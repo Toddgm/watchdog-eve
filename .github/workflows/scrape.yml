@@ -25,7 +25,8 @@ jobs:
             curl -s -X POST \
               "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
               -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-              -d "text=💰 FunPay Deals Under $50:%0A%0A$MESSAGE"
+              -d "text=💰 FunPay Deals Under $50:%0A%0A$MESSAGE" \
+              -d "parse_mode=Markdown"
           else
             echo "No new offers found."
           fi
