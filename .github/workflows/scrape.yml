@@ -1,8 +1,8 @@
 name: FunPay Scraper
 on:
   schedule:
-    - cron: "0 * * * *"  # Runs every hours
-  workflow_dispatch:        # Manual trigger
+    - cron: "0 * * * *"  # Runs every hour
+  workflow_dispatch:      # Manual trigger
 
 jobs:
   scrape-and-notify:
@@ -17,14 +17,16 @@ jobs:
         run: pip install requests beautifulsoup4 lxml
       - name: Run scraper
         run: |
-          echo "Debug: Starting script..."  # Log start
-          python funpay_scraper.py 
+          echo "Debug: Starting script..."
+          python funpay_scraper.py > offers.txt
           echo "Debug: Script finished. Checking file..."
-          ls -la offers.txt                # Check if file exists
-      - name: Upload offers file
+          ls -la offers.txt
+          echo "File contents:"
+          cat offers.txt
+      - name: Upload offers as artifact
         uses: actions/upload-artifact@v3
         with:
-          name: offers-file
+          name: funpay-offers
           path: offers.txt
       - name: Send Telegram notification
         if: always()
