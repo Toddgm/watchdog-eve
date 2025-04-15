@@ -10,39 +10,38 @@ jobs:
   scrape-and-notify:
     runs-on: ubuntu-latest
     steps:
+      # STEP 1: Checkout code - Needed for comparing and committing
       - name: Checkout repository
-        # Need checkout to compare against previous version and commit changes
         uses: actions/checkout@v4
 
+      # STEP 2: Setup Python environment
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.10" # Or your preferred version
 
+      # STEP 3: Install Python dependencies
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml # Ensure lxml is installed if bs4 needs it
 
+      # STEP 4: Run the scraper - Python script now writes the file directly
       - name: Run scraper script
-        id: scrape # Give step an ID for potential future use
         run: |
-          # Let the Python script write directly to offers.txt
+          echo "Running funpay_scraper.py..."
           python funpay_scraper.py
-          echo "Scraper finished. offers.txt generated/updated."
-          echo "--- Current offers.txt content ---"
-          cat offers.txt || echo "offers.txt might be empty or failed to read"
-          echo "--- End of offers.txt content ---"
+          echo "Scraper finished. offers.txt should be updated/created."
+          echo "--- Current offers.txt content preview ---"
+          # Use head in case file is huge, add || true to prevent error if file missing initially
+          head -n 20 offers.txt || true
+          echo "--- End of preview ---"
 
-      # Step 1: Check if the file has actually changed compared to the last commit
+      # STEP 5: Check if offers.txt has changed since the last commit
       - name: Check for file changes
-        id: diff_check
+        id: diff_check # Give step an ID to reference its output
         run: |
-          # Configure git user for diff command if needed (usually not required just for diff)
-          # git config --global user.name 'github-actions[bot]'
-          # git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-          # Check if offers.txt is different from HEAD
+          # Check if offers.txt is different from HEAD (the last commit)
           # --quiet returns exit code 1 if different, 0 if same.
-          # We set 'changed=true' if the exit code is non-zero (meaning it changed)
+          # We set 'changed=true' in the output if the exit code is non-zero (meaning it changed)
           if ! git diff --quiet HEAD -- offers.txt; then
             echo "offers.txt has changed."
             echo "changed=true" >> $GITHUB_OUTPUT
@@ -51,128 +50,73 @@ jobs:
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-      # Step 2: Check if the changed file actually contains offers (not just header/empty message)
-      # Runs ONLY if the file changed in the previous step
-      - name: Check if file contains offers
-        id: content_check
-        if: steps.diff_check.outputs.changed == 'true'
-        run: |
-          # Use grep to search for the specific pattern indicating an offer exists
-          # "-q" makes grep quiet, it just returns exit status 0 if found, non-zero otherwise
-          # We look for "Offer #" which is added by the python script for each valid offer
-          if grep -q "Offer #" offers.txt; then
-            echo "File contains 'Offer #' lines."
-            echo "has_offers=true" >> $GITHUB_OUTPUT
-          else
-            echo "File does NOT contain 'Offer #' lines (likely only headers or 'no offers found')."
-            echo "has_offers=false" >> $GITHUB_OUTPUT
-          fi
-
-      # Step 3: Commit changes if the file has changed (regardless of content for history)
-      # Runs ONLY if the file changed
+      # STEP 6: Commit changes IF the file has changed
       - name: Commit changes
+        # Run this step ONLY if the previous step set changed=true
         if: steps.diff_check.outputs.changed == 'true'
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add offers.txt
-          # Check if there are staged changes before committing
+          # Check if there are staged changes before committing (important!)
           if ! git diff --staged --quiet; then
             git commit -m "Update offers.txt from scraper run ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
             git push
             echo "Committed and pushed changes to offers.txt"
           else
-            # This case shouldn't happen often with the current logic but is a safeguard
             echo "No staged changes detected after 'git add', skipping commit/push."
           fi
 
-      # Step 4: Send Telegram notification
-      # Runs ONLY if the file Changed AND it Has Offers
+      # STEP 7: Send Telegram notification IF changed AND contains offers
       - name: Send Telegram notification
-        if: steps.diff_check.outputs.changed == 'true' && steps.content_check.outputs.has_offers == 'true'
-        # CORRECTED: The 'env' block is now at the same level as 'if' and 'run'
+        # Run this step ONLY if the file changed (output from step 5)
+        if: steps.diff_check.outputs.changed == 'true'
+        run: |
+          echo "File changed, checking content before sending notification..."
+          # Check if file exists AND contains "Offer #" pattern
+          # grep -q is quiet, returns 0 if found, non-zero otherwise
+          if [ -f offers.txt ] && grep -q "Offer #" offers.txt; then
+            echo "File contains 'Offer #'. Preparing and sending notification..."
+            # Limit message size using head to prevent potential curl/Telegram issues
+            MESSAGE_CONTENT=$(head -c 4000 offers.txt)
+            # Optional: Add ellipsis if truncated
+            if [ $(wc -c < offers.txt) -gt 4000 ]; then
+              MESSAGE_CONTENT="${MESSAGE_CONTENT}..."
+            fi
+
+            # Prepare message for curl -d (basic URL encoding for common chars might be needed manually if issues arise)
+            # NOTE: Complex characters in MESSAGE_CONTENT can still break this basic curl call.
+            # The python approach was more robust for encoding, but caused YAML issues for you.
+            # Minimal URL encoding for ': / &' which commonly break -d
+            # A more robust shell way involves printf or external tools, but keeping it simple:
+            ENCODED_MESSAGE=$(echo "$MESSAGE_CONTENT" | sed 's/%/%25/g; s/:/%3A/g; s/\//%2F/g; s/&/%26/g; s/\+/%2B/g; s/?/%3F/g; s/=/%3D/g; s/@/%40/g')
+            # Replace newlines with URL-encoded newlines (%0A) AFTER other encoding
+            ENCODED_MESSAGE=$(echo "$ENCODED_MESSAGE" | awk '{printf "%s%%0A", $0}' | sed 's/%0A$//') # Preserve newlines correctly
+
+            # Construct text part (needs encoding too if it contains special chars, but keeping simple here)
+            TEXT_PREFIX="💰 FunPay Deals (Price < \$50, SP >= 10M):%0A%0A" # %0A is newline
+
+            curl -s -X POST \
+              "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              --connect-timeout 10 \
+              -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d "text=${TEXT_PREFIX}${ENCODED_MESSAGE}" \
+              -d "disable_web_page_preview=true" # Optional: disable link previews
+
+             echo # Add a newline for cleaner logs
+             echo "Telegram notification attempt finished."
+
+          else
+            echo "File does not contain 'Offer #' pattern. Skipping notification."
+          fi
         env:
+          # Secrets are still needed for the curl command
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Pass the potentially truncated content via environment variable
-          # We'll capture it inside the run block now
+
+      # STEP 8: Log skipped reason (Optional but helpful)
+      - name: Log skipped steps reason (optional)
+        # Run if the file did NOT change (covers commit & notification skip)
+        if: steps.diff_check.outputs.changed == 'false'
         run: |
-          echo "File changed and contains offers. Preparing Telegram notification."
-
-          # Truncate message to avoid Telegram API limits (4096 bytes). head -c counts bytes.
-          MESSAGE_CONTENT=$(head -c 4000 offers.txt)
-          # Optional: Add ellipsis if truncated
-          if [ $(wc -c < offers.txt) -gt 4000 ]; then
-            MESSAGE_CONTENT="${MESSAGE_CONTENT}..."
-          fi
-
-          # Use Python for safer URL encoding of the message body
-          # Ensure requests is installed within the step if not already guaranteed
-          pip install requests
-          # Pass the captured message content to the Python script via env var
-          export MESSAGE_CONTENT # Make shell variable available as environment variable
-          python -c "
-import os
-import requests
-import urllib.parse
-import sys
-
-# Secrets are directly available via env now due to the step-level 'env:' block
-bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-# Read the content passed from the shell variable
-message_body = os.environ.get('MESSAGE_CONTENT')
-
-if not bot_token or not chat_id:
-    print('Error: Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID secrets.', file=sys.stderr)
-    sys.exit(1)
-if not message_body:
-    # Handle case where head command might have failed or file was empty unexpectedly
-    print('Warning: MESSAGE_CONTENT is empty, sending a generic message.', file=sys.stderr)
-    message_body = '(Could not read offers.txt content)'
-
-# Construct the message text
-text = f\"💰 New FunPay deals found (Price < $50, SP >= 10M):\n\n{message_body}\"
-
-# Re-truncate if prefix made it too long (Telegram limit 4096 bytes)
-if len(text.encode('utf-8')) > 4096:
-    # Truncate based on bytes, ensuring valid UTF-8
-    text_bytes = text.encode('utf-8')
-    text_bytes = text_bytes[:4090] # Leave room for ellipsis
-    # Decode back, ignoring errors in case we cut mid-character
-    text = text_bytes.decode('utf-8', 'ignore') + '...'
-
-url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
-# Using data payload for POST, values will be url-encoded by requests automatically
-params = {
-    'chat_id': chat_id,
-    'text': text
-    # Optional: 'parse_mode': 'Markdown' or 'HTML' if you want formatting
-}
-
-print(f'Sending message to chat_id {chat_id[:4]}...')
-try:
-    response = requests.post(url, data=params, timeout=15) # Add timeout
-    response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
-    print('Telegram notification sent successfully.')
-    # print(f'Telegram API Response: {response.text[:200]}...') # Optional: Log response
-except requests.exceptions.Timeout:
-    print(f'Error: Telegram request timed out.', file=sys.stderr)
-    sys.exit(1)
-except requests.exceptions.RequestException as e:
-    print(f'Error sending Telegram notification: {e}', file=sys.stderr)
-    if e.response is not None:
-        print(f'Response status: {e.response.status_code}', file=sys.stderr)
-        print(f'Response text: {e.response.text}', file=sys.stderr)
-    sys.exit(1)
-"
-
-      - name: Log skipped notification reason (optional)
-        # Runs if the file didn't change OR if it changed but had no offers
-        if: steps.diff_check.outputs.changed == 'false' || (steps.diff_check.outputs.changed == 'true' && steps.content_check.outputs.has_offers == 'false')
-        run: |
-          if [[ "${{ steps.diff_check.outputs.changed }}" == "false" ]]; then
-            echo "Skipped commit and notification: offers.txt did not change since last commit."
-          elif [[ "${{ steps.content_check.outputs.has_offers }}" == "false" ]]; then
-            echo "Skipped notification: offers.txt changed but contains no 'Offer #' lines (likely just headers or 'no offers' message)."
-          fi
+          echo "Skipped commit and notification: offers.txt did not change since last commit."
