@@ -28,6 +28,9 @@ jobs:
         with:
           name: funpay-offers
           path: offers.txt
+      - name: Test Telegram API
+        run: |
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getMe"
       - name: Send Telegram notification
         if: always()
         run: |
