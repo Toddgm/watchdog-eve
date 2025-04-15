@@ -1,0 +1,78 @@
+# .github/workflows/manual_test_scrape.yml
+
+name: Manual Test - FunPay Scraper & Notify
+
+# Only allow manual triggers from the GitHub Actions UI
+on:
+  workflow_dispatch:
+
+jobs:
+  # Renamed job for clarity
+  test-scrape-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      # STEP 1: Checkout code (Needed to access your scraper script)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # STEP 2: Setup Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10" # Match your main workflow
+
+      # STEP 3: Install Python dependencies
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml
+
+      # STEP 4: Run the scraper script (generates offers.txt in runner workspace)
+      - name: Run scraper script
+        run: |
+          echo "Running funpay_scraper.py for manual test..."
+          python funpay_scraper_test.py
+          echo "Scraper finished. offers.txt should be generated."
+          echo "--- offers.txt content preview (manual test) ---"
+          # Display some output for verification in logs
+          head -n 30 offers.txt || echo "offers.txt might be empty or not generated."
+          echo "--- End of preview ---"
+
+      # STEP 5: Send Telegram notification (Unconditionally)
+      # NOTE: Removed 'if:' conditions - this step always runs in this test workflow
+      - name: Send Telegram Test Notification
+        run: |
+          echo "Preparing Telegram test notification..."
+          # Check if offers.txt exists and is not empty to provide content
+          if [ -s offers.txt ]; then
+            echo "offers.txt exists and is not empty. Sending content."
+            # Limit message size (same as main workflow)
+            MESSAGE_CONTENT=$(head -c 4000 offers.txt)
+            if [ $(wc -c < offers.txt) -gt 4000 ]; then
+              MESSAGE_CONTENT="${MESSAGE_CONTENT}..."
+            fi
+          else
+            # Send a placeholder if the file is empty or missing
+            echo "offers.txt is empty or missing. Sending placeholder message."
+            MESSAGE_CONTENT="🧪 Test run: Scraper ran, but offers.txt was empty or not found."
+          fi
+
+          # Basic URL encoding (same caveats about robustness as before)
+          ENCODED_MESSAGE=$(echo "$MESSAGE_CONTENT" | sed 's/%/%25/g; s/:/%3A/g; s/\//%2F/g; s/&/%26/g; s/\+/%2B/g; s/?/%3F/g; s/=/%3D/g; s/@/%40/g')
+          ENCODED_MESSAGE=$(echo "$ENCODED_MESSAGE" | awk '{printf "%s%%0A", $0}' | sed 's/%0A$//') # Preserve newlines
+
+          # Add a clear test prefix to the message
+          TEXT_PREFIX="🧪 MANUAL TEST - FunPay Scraper Results:%0A%0A"
+
+          # Use curl to send the message
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            --connect-timeout 10 \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${TEXT_PREFIX}${ENCODED_MESSAGE}" \
+            -d "disable_web_page_preview=true" # Optional
+
+          echo # Add a newline for cleaner logs
+          echo "Telegram test notification attempt finished."
+        env:
+          # Secrets are still required for the curl command
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
