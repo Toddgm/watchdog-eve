@@ -8,7 +8,7 @@ import re # Import regex module
 URL = "https://funpay.com/en/lots/687/"
 OUTPUT_FILE = "offers.txt"
 MAX_PRICE_USD = 50.00
-MIN_SP_MILLION = 10.0 # Minimum Skill Points required (in Millions)
+MIN_SP_MILLION = 20.0 # Minimum Skill Points required (in Millions)
 
 HEADERS = {
     # Mimic a browser to avoid simple blocks
