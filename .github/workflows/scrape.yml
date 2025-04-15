@@ -24,7 +24,7 @@ jobs:
           echo "File contents:"
           cat offers.txt
       - name: Upload offers as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: funpay-offers
           path: offers.txt
