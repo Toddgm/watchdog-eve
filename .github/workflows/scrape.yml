@@ -18,9 +18,14 @@ jobs:
       - name: Run scraper
         run: |
           echo "Debug: Starting script..."  # Log start
-          python funpay_scraper.py  > "$GITHUB_WORKSPACE/offers.txt"  # Explicit path
+          python funpay_scraper.py 
           echo "Debug: Script finished. Checking file..."
           ls -la offers.txt                # Check if file exists
+      - name: Upload offers file
+        uses: actions/upload-artifact@v3
+        with:
+          name: offers-file
+          path: offers.txt
       - name: Send Telegram notification
         if: always()
         run: |
