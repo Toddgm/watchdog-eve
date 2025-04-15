@@ -16,7 +16,11 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml
       - name: Run scraper
-        run: python funpay_scraper.py
+        run: |
+          echo "Debug: Starting script..."  # Log start
+          python funpay_scraper.py  > "$GITHUB_WORKSPACE/offers.txt"  # Explicit path
+          echo "Debug: Script finished. Checking file..."
+          ls -la offers.txt                # Check if file exists
       - name: Send Telegram notification
         if: always()
         run: |
