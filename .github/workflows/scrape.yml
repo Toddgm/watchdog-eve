@@ -23,14 +23,6 @@ jobs:
           ls -la offers.txt
           echo "File contents:"
           cat offers.txt
-      - name: Upload offers as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: funpay-offers
-          path: offers.txt
-      - name: Test Telegram API
-        run: |
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getMe"
       - name: Send Telegram notification
         if: always()
         run: |
