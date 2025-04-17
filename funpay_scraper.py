@@ -229,7 +229,7 @@ def save_new_offers_to_file(offers, filename, max_price, min_sp, url):
                 f.write(f"  Description: {clean_description}\n")
                 f.write(f"  Seller: {offer['seller']}\n")
                 f.write(f"  Price: {offer['price_text']} (${offer['price_usd']:.2f})\n")
-                f.write(f"  SP (Millions, extracted): {offer['sp_million']:.1f}M\n")
+                f.write(f"  SP (M): {offer['sp_million']:.1f}M\n")
                 f.write(f"  Link: https://funpay.com/en/lots/offer?id={offer['id']}\n") # Add link
                 f.write("-" * 20 + "\n\n")
         logging.info(f"Successfully saved NEW offers to {filename}")
