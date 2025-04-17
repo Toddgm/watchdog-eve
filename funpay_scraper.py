@@ -208,25 +208,26 @@ def scrape_funpay_offers(url, max_price, min_sp):
 
 def save_offers_to_file(offers, filename, max_price, min_sp):
     """
-    Saves the list of filtered offers to a text file.
+    Saves the list of filtered offers to a text file ONLY IF offers are found.
     """
+    # --- NEW: Only proceed if the offers list is not empty ---
+    if not offers:
+        logging.info("No offers found matching criteria. Skipping file creation.")
+        return # Exit the function, do not create the file
+
+    # --- Existing code continues below, runs only if offers exist ---
     logging.info(f"Saving {len(offers)} offers to {filename}...")
     try:
         with open(filename, 'w', encoding='utf-8') as f:
+            # No need for the "No offers found" message here anymore
             f.write(f"--- Offers matching Price < ${max_price:.2f} AND SP >= {min_sp:.1f}M from {URL} ---\n\n")
-            if not offers:
-                f.write("No offers found matching the specified criteria.\n")
-                f.write("(Note: SP extraction relies on parsing description text and may not find all matches.)\n")
-                logging.info("Output file written (no offers found).")
-                return
-
             for i, offer in enumerate(offers):
                 f.write(f"Offer #{i+1}\n")
                 clean_description = ' '.join(offer['description'].split())
                 f.write(f"  Description: {clean_description}\n")
                 f.write(f"  Seller: {offer['seller']}\n")
                 f.write(f"  Price: {offer['price_text']} (${offer['price_usd']:.2f})\n")
-                f.write(f"  SP (Millions, extracted): {offer['sp_million']:.1f}M\n") # Added SP to output
+                f.write(f"  SP (Millions, extracted): {offer['sp_million']:.1f}M\n")
                 f.write("-" * 20 + "\n\n")
         logging.info(f"Successfully saved offers to {filename}")
     except IOError as e:
@@ -239,5 +240,6 @@ if __name__ == "__main__":
     logging.info("Starting Funpay scraper script...")
     logging.info(f"Filtering for: Price < ${MAX_PRICE_USD:.2f} AND SP >= {MIN_SP_MILLION:.1f}M")
     filtered_offers_list = scrape_funpay_offers(URL, MAX_PRICE_USD, MIN_SP_MILLION)
+    # Now this call will only create the file if filtered_offers_list is not empty
     save_offers_to_file(filtered_offers_list, OUTPUT_FILE, MAX_PRICE_USD, MIN_SP_MILLION)
     logging.info("Script finished.")
