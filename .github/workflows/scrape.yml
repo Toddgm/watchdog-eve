@@ -1,16 +1,16 @@
-name: FunPay Scraper (Notify & Delete)
+name: FunPay Scraper (ID Tracking & Notify New)
 
 on:
   schedule:
-    # Run every hour (or adjust frequency as needed)
+    # Run every hour
     - cron: "0 * * * *"
   workflow_dispatch: # Allow manual trigger
 
 jobs:
-  scrape-notify-delete: # Renamed job slightly
+  scrape-track-notify:
     runs-on: ubuntu-latest
     steps:
-      # STEP 1: Checkout code (Still needed for the script)
+      # STEP 1: Checkout code (Needed for script AND processed_ids.txt)
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -18,43 +18,39 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10" # Or your preferred version
+          python-version: "3.10"
 
       # STEP 3: Install Python dependencies
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml
+        run: pip install requests beautifulsoup4 lxml # urllib included in standard lib
 
       # STEP 4: Run the scraper script
-      # Python script now ONLY creates offers.txt if matches are found
+      # Python script now handles ID loading/appending and creates offers.txt only for NEW items
       - name: Run scraper script
         run: |
-          echo "Running funpay_scraper.py..."
+          echo "Running funpay_scraper.py with ID tracking..."
           python funpay_scraper.py
-          # Check if the file was created after running
+          # Check if offers.txt (for new items) was created
           if [ -f offers.txt ]; then
-            echo "Scraper finished. offers.txt created (offers found)."
-            echo "--- Current offers.txt content preview ---"
-            head -n 20 offers.txt
+            echo "Scraper finished. offers.txt created (NEW offers found)."
+            echo "--- New offers content preview ---"
+            head -n 30 offers.txt
             echo "--- End of preview ---"
           else
-            echo "Scraper finished. offers.txt was NOT created (no offers found)."
+            echo "Scraper finished. offers.txt was NOT created (no NEW offers found)."
           fi
+          # Also log if the persistent ID file exists/changed
+          echo "--- Processed IDs file status ---"
+          ls -l processed_ids.txt || echo "processed_ids.txt does not exist."
 
-      # STEP 5: Send Telegram notification IF offers.txt was created
-      - name: Send Telegram notification
-        # Condition: Run ONLY if the offers.txt file exists (meaning offers were found)
-        if: success() && runner.os == 'Linux' && hashFiles('offers.txt') != '' # More robust check for file existence and non-emptiness
-        # Alternative simpler check (might run even if file is empty, but less likely now):
-        # if: success() && runner.os == 'Linux' && steps.<previous_step_id>.outcome == 'success' # Check if the file exists is better
-        # Let's stick to checking file existence as it's direct:
-        # We'll check inside the run block for simplicity now.
-
-        # Run block will now check existence before sending
+      # STEP 5: Send Telegram notification IF offers.txt was created (meaning NEW offers)
+      - name: Send Telegram notification for NEW offers
+        # Run ONLY if offers.txt exists (created by python script for new offers)
+        # Checking inside the run block is simplest here
         run: |
-          # Check if file exists AND contains "Offer #" pattern (double check)
           if [ -f offers.txt ] && grep -q "Offer #" offers.txt; then
-            echo "offers.txt exists and contains offers. Preparing and sending notification..."
-            # Limit message size using head
+            echo "NEW offers found (offers.txt exists). Preparing notification..."
+            # Limit message size
             MESSAGE_CONTENT=$(head -c 4000 offers.txt)
             if [ $(wc -c < offers.txt) -gt 4000 ]; then
               MESSAGE_CONTENT="${MESSAGE_CONTENT}..."
@@ -64,7 +60,7 @@ jobs:
             ENCODED_MESSAGE=$(echo "$MESSAGE_CONTENT" | sed 's/%/%25/g; s/:/%3A/g; s/\//%2F/g; s/&/%26/g; s/\+/%2B/g; s/?/%3F/g; s/=/%3D/g; s/@/%40/g')
             ENCODED_MESSAGE=$(echo "$ENCODED_MESSAGE" | awk '{printf "%s%%0A", $0}' | sed 's/%0A$//') # Preserve newlines
 
-            TEXT_PREFIX="💰 FunPay Deals Found (Price < \$50, SP >= 10M):%0A%0A"
+            TEXT_PREFIX="🚨 NEW FunPay Deals Found :%0A%0A" # Changed prefix slightly
 
             curl -s -X POST \
               "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
@@ -73,21 +69,49 @@ jobs:
               -d "text=${TEXT_PREFIX}${ENCODED_MESSAGE}" \
               -d "disable_web_page_preview=true"
 
-             echo # Add a newline for cleaner logs
-             echo "Telegram notification attempt finished."
-
+             echo; echo "Telegram notification attempt finished."
           else
-            echo "offers.txt does not exist or contains no 'Offer #' lines. Skipping notification."
+            echo "No NEW offers found (offers.txt does not exist or is empty). Skipping notification."
           fi
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      # STEP 6: Cleanup offers.txt
-      - name: Cleanup offers.txt
-        # Run always to ensure cleanup happens even if notification step fails or is skipped
-        if: always()
+      # STEP 6: Commit updated processed IDs file
+      - name: Commit processed IDs
+        # Always run this step to check if the ID file needs committing
         run: |
-          echo "Cleaning up offers.txt..."
-          rm -f offers.txt # Use force to avoid error if file doesn't exist
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          # Add the file specifically. It might have been created or appended to.
+          git add processed_ids.txt
+          # Check if the file was actually changed or added
+          if ! git diff --staged --quiet -- processed_ids.txt; then
+            echo "Committing changes to processed_ids.txt..."
+            git commit -m "Update processed offer IDs ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
+            # Add retry logic for push in case of transient network issues or locks
+            retry_count=0
+            max_retries=3
+            until git push || [ $retry_count -eq $max_retries ]; do
+              retry_count=$((retry_count+1))
+              echo "Push failed. Retrying (${retry_count}/${max_retries})..."
+              sleep 5 # Wait before retrying
+              # Attempt to remove lock file just in case, ignore error if it doesn't exist
+              rm -f .git/index.lock || true
+            done
+            if [ $retry_count -eq $max_retries ]; then
+              echo "Error: Failed to push processed_ids.txt after $max_retries retries."
+              exit 1 # Fail the step if push fails repeatedly
+            fi
+            echo "Committed and pushed changes to processed_ids.txt"
+          else
+            echo "No changes detected in processed_ids.txt. Nothing to commit."
+          fi
+
+      # STEP 7: Cleanup offers.txt (the temporary notification file)
+      - name: Cleanup offers.txt
+        if: always() # Run regardless of previous steps' success
+        run: |
+          echo "Cleaning up temporary offers.txt..."
+          rm -f offers.txt
           echo "offers.txt removed (if it existed)."
