@@ -1,4 +1,4 @@
-name: FunPay Scraper
+name: FunPay Scraper (Notify & Delete)
 
 on:
   schedule:
@@ -7,10 +7,10 @@ on:
   workflow_dispatch: # Allow manual trigger
 
 jobs:
-  scrape-and-notify:
+  scrape-notify-delete: # Renamed job slightly
     runs-on: ubuntu-latest
     steps:
-      # STEP 1: Checkout code - Needed for comparing and committing
+      # STEP 1: Checkout code (Still needed for the script)
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -22,101 +22,72 @@ jobs:
 
       # STEP 3: Install Python dependencies
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml # Ensure lxml is installed if bs4 needs it
+        run: pip install requests beautifulsoup4 lxml
 
-      # STEP 4: Run the scraper - Python script now writes the file directly
+      # STEP 4: Run the scraper script
+      # Python script now ONLY creates offers.txt if matches are found
       - name: Run scraper script
         run: |
           echo "Running funpay_scraper.py..."
           python funpay_scraper.py
-          echo "Scraper finished. offers.txt should be updated/created."
-          echo "--- Current offers.txt content preview ---"
-          # Use head in case file is huge, add || true to prevent error if file missing initially
-          head -n 20 offers.txt || true
-          echo "--- End of preview ---"
-
-      # STEP 5: Check if offers.txt has changed since the last commit
-      - name: Check for file changes
-        id: diff_check # Give step an ID to reference its output
-        run: |
-          # Check if offers.txt is different from HEAD (the last commit)
-          # --quiet returns exit code 1 if different, 0 if same.
-          # We set 'changed=true' in the output if the exit code is non-zero (meaning it changed)
-          if ! git diff --quiet HEAD -- offers.txt; then
-            echo "offers.txt has changed."
-            echo "changed=true" >> $GITHUB_OUTPUT
+          # Check if the file was created after running
+          if [ -f offers.txt ]; then
+            echo "Scraper finished. offers.txt created (offers found)."
+            echo "--- Current offers.txt content preview ---"
+            head -n 20 offers.txt
+            echo "--- End of preview ---"
           else
-            echo "offers.txt has NOT changed."
-            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Scraper finished. offers.txt was NOT created (no offers found)."
           fi
 
-      # STEP 6: Commit changes IF the file has changed
-      - name: Commit changes
-        # Run this step ONLY if the previous step set changed=true
-        if: steps.diff_check.outputs.changed == 'true'
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add offers.txt
-          # Check if there are staged changes before committing (important!)
-          if ! git diff --staged --quiet; then
-            git commit -m "Update offers.txt from scraper run ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
-            git push
-            echo "Committed and pushed changes to offers.txt"
-          else
-            echo "No staged changes detected after 'git add', skipping commit/push."
-          fi
-
-      # STEP 7: Send Telegram notification IF changed AND contains offers
+      # STEP 5: Send Telegram notification IF offers.txt was created
       - name: Send Telegram notification
-        # Run this step ONLY if the file changed (output from step 5)
-        if: steps.diff_check.outputs.changed == 'true'
+        # Condition: Run ONLY if the offers.txt file exists (meaning offers were found)
+        if: success() && runner.os == 'Linux' && hashFiles('offers.txt') != '' # More robust check for file existence and non-emptiness
+        # Alternative simpler check (might run even if file is empty, but less likely now):
+        # if: success() && runner.os == 'Linux' && steps.<previous_step_id>.outcome == 'success' # Check if the file exists is better
+        # Let's stick to checking file existence as it's direct:
+        # We'll check inside the run block for simplicity now.
+
+        # Run block will now check existence before sending
         run: |
-          echo "File changed, checking content before sending notification..."
-          # Check if file exists AND contains "Offer #" pattern
-          # grep -q is quiet, returns 0 if found, non-zero otherwise
+          # Check if file exists AND contains "Offer #" pattern (double check)
           if [ -f offers.txt ] && grep -q "Offer #" offers.txt; then
-            echo "File contains 'Offer #'. Preparing and sending notification..."
-            # Limit message size using head to prevent potential curl/Telegram issues
+            echo "offers.txt exists and contains offers. Preparing and sending notification..."
+            # Limit message size using head
             MESSAGE_CONTENT=$(head -c 4000 offers.txt)
-            # Optional: Add ellipsis if truncated
             if [ $(wc -c < offers.txt) -gt 4000 ]; then
               MESSAGE_CONTENT="${MESSAGE_CONTENT}..."
             fi
 
-            # Prepare message for curl -d (basic URL encoding for common chars might be needed manually if issues arise)
-            # NOTE: Complex characters in MESSAGE_CONTENT can still break this basic curl call.
-            # The python approach was more robust for encoding, but caused YAML issues for you.
-            # Minimal URL encoding for ': / &' which commonly break -d
-            # A more robust shell way involves printf or external tools, but keeping it simple:
+            # Basic URL encoding
             ENCODED_MESSAGE=$(echo "$MESSAGE_CONTENT" | sed 's/%/%25/g; s/:/%3A/g; s/\//%2F/g; s/&/%26/g; s/\+/%2B/g; s/?/%3F/g; s/=/%3D/g; s/@/%40/g')
-            # Replace newlines with URL-encoded newlines (%0A) AFTER other encoding
-            ENCODED_MESSAGE=$(echo "$ENCODED_MESSAGE" | awk '{printf "%s%%0A", $0}' | sed 's/%0A$//') # Preserve newlines correctly
+            ENCODED_MESSAGE=$(echo "$ENCODED_MESSAGE" | awk '{printf "%s%%0A", $0}' | sed 's/%0A$//') # Preserve newlines
 
-            # Construct text part (needs encoding too if it contains special chars, but keeping simple here)
-            TEXT_PREFIX="💰 FunPay Deals (Price < \$50, SP >= 10M):%0A%0A" # %0A is newline
+            TEXT_PREFIX="💰 FunPay Deals Found (Price < \$50, SP >= 10M):%0A%0A"
 
             curl -s -X POST \
               "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
               --connect-timeout 10 \
               -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
               -d "text=${TEXT_PREFIX}${ENCODED_MESSAGE}" \
-              -d "disable_web_page_preview=true" # Optional: disable link previews
+              -d "disable_web_page_preview=true"
 
              echo # Add a newline for cleaner logs
              echo "Telegram notification attempt finished."
 
           else
-            echo "File does not contain 'Offer #' pattern. Skipping notification."
+            echo "offers.txt does not exist or contains no 'Offer #' lines. Skipping notification."
           fi
         env:
-          # Secrets are still needed for the curl command
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      # STEP 8: Log skipped reason (Optional but helpful)
-      - name: Log skipped steps reason (optional)
-        # Run if the file did NOT change (covers commit & notification skip)
-        if: steps.diff_check.outputs.changed == 'false'
+      # STEP 6: Cleanup offers.txt
+      - name: Cleanup offers.txt
+        # Run always to ensure cleanup happens even if notification step fails or is skipped
+        if: always()
         run: |
-          echo "Skipped commit and notification: offers.txt did not change since last commit."
+          echo "Cleaning up offers.txt..."
+          rm -f offers.txt # Use force to avoid error if file doesn't exist
+          echo "offers.txt removed (if it existed)."
