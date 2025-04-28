@@ -270,7 +270,7 @@ if __name__ == "__main__":
 
     if notification_needed:
         logging.info("Changes detected, preparing notification message.")
-        message_parts = ["FunPay Update:\n"]
+        message_parts = ["FunPay(EVE ECHOES) Update:\n"]
         item_counter = 0 # Use a single counter for all items
 
         if new_offers:
@@ -285,28 +285,28 @@ if __name__ == "__main__":
             message_parts.append("=" * 15) # Section end
 
         if price_decreased:
-            message_parts.append("\n💲⬇️ Price Decreased:")
-            message_parts.append("-" * 15)
+            message_parts.append("\n💲⬇️")
+            message_parts.append("-" * 10)
             for offer in price_decreased: # Iterate sorted list
                 item_counter += 1
                 formatted_offer = format_offer_for_message(offer)
-                price_change_line = f"Price Change: ${offer['last_price']:.2f} -> ${offer['price_usd']:.2f} (⬇️)"
+                price_change_line = f"Price (⬇️): ${offer['last_price']:.2f} -> ${offer['price_usd']:.2f} "
                 message_parts.append(f"#{item_counter}\n{price_change_line}\n{formatted_offer}")
                 message_parts.append("")
             if message_parts[-1] == "": message_parts.pop()
             message_parts.append("=" * 15)
 
         if price_increased: # Check flag if you add it back
-            message_parts.append("\n💲⬆️ Price Increased:")
-            message_parts.append("-" * 15)
+            message_parts.append("\n💲⬆️")
+            message_parts.append("-" * 10)
             for offer in price_increased: # Iterate sorted list
                 item_counter += 1
                 formatted_offer = format_offer_for_message(offer)
-                price_change_line = f"Price Change: ${offer['last_price']:.2f} -> ${offer['price_usd']:.2f} (⬆️)"
+                price_change_line = f"Price (⬆️): ${offer['last_price']:.2f} -> ${offer['price_usd']:.2f}"
                 message_parts.append(f"#{item_counter}\n{price_change_line}\n{formatted_offer}")
                 message_parts.append("")
             if message_parts[-1] == "": message_parts.pop()
-            message_parts.append("=" * 15)
+            message_parts.append("*" * 15)
 
         full_message = "\n".join(message_parts)
 
