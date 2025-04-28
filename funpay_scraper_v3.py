@@ -7,6 +7,8 @@ import os
 import json # For handling state file
 from urllib.parse import urlparse, parse_qs
 import sys
+from dotenv import load_dotenv
+load_dotenv()
 
 # --- Configuration ---
 URL = "https://funpay.com/en/lots/687/"
@@ -106,33 +108,33 @@ def extract_sp_from_description(description):
         logging.debug(f"Strict 'X m SP' pattern not found at end of description: '{description}'")
         return None # Pattern not found
 
-def format_offer_for_message(offer_details):
-    """Formats the details of a single offer for the Telegram message body."""
+
+def format_offer_body(offer_details):
+    """Formats the core details of a single offer (description, price, sp, link) for the message."""
     desc = ' '.join(offer_details['description'].split())
-    # Ensure truncation doesn't cut the critical 'X m SP' part if possible, but still truncate long descriptions
-    # Simple approach: just truncate from the start if needed, the SP is at the end anyway.
+    # Attempt to preserve the SP part at the end during truncation
     if len(desc) > DESCRIPTION_TRUNCATE_LENGTH:
-        # Find the last occurrence of " m SP"
         sp_match = re.search(r'\d+(?:\.\d+)?\s*m\s*sp\s*$', desc.lower())
         if sp_match:
-             # Keep the end of the description including the SP part, and truncate the beginning
-             keep_length = len(desc) - sp_match.start() # Length from start of SP match to end
+             # Calculate length from the start of the SP match to the end of the string
+             keep_length = len(desc) - sp_match.start()
+             # If the SP part is shorter than the desired total truncated length,
+             # include enough text from before the SP part.
              if keep_length < DESCRIPTION_TRUNCATE_LENGTH:
-                  # Truncate the beginning, ensuring we keep the SP part
+                  # Truncate the beginning of the description
                   truncate_point = DESCRIPTION_TRUNCATE_LENGTH - keep_length
-                  desc = "..." + desc[-truncate_point - keep_length:] # Keep enough characters from end + SP part
+                  # Ensure we don't create empty strings or index errors
+                  start_index = max(0, len(desc) - DESCRIPTION_TRUNCATE_LENGTH + 3)
+                  desc = "..." + desc[start_index:]
              else:
-                 # If the SP part itself is longer than or equal to the truncation length,
-                 # just show the SP part with preceding "..." if needed.
+                 # If the SP part is already long, just show it with "..." preceding
                  desc = "..." + desc[sp_match.start():]
-
         else:
-             # Fallback to simple truncation if SP pattern not found (shouldn't happen based on strict rule)
+             # Fallback to simple truncation if SP pattern isn't found at the end
              desc = desc[:DESCRIPTION_TRUNCATE_LENGTH] + "..."
-    else:
-        desc = desc # Keep full description if short enough
+    # else: desc remains as is if short enough
 
-    price_str = f"${offer_details['price_usd']:.2f}" if offer_details['price_usd'] is not None else offer_details['price_text']
+    price_str = f"${offer_details['price_usd']:.2f}" if offer_details['price_usd'] is not None else offer_details.get('price_text', 'Price N/A')
     sp_str = f"{offer_details['sp_million']:.1f}M SP" if offer_details['sp_million'] is not None else "SP N/A"
     link = offer_details.get('href', f"https://funpay.com/en/lots/offer?id={offer_details['id']}")
 
@@ -143,6 +145,55 @@ def format_offer_for_message(offer_details):
         f"Link: {link}"
     ]
     return "\n".join(lines)
+
+def format_offer_block_lines(offer_details, item_number, price_change_prefix=""):
+    """Formats a complete block of text for a single offer including header, ratio, and body."""
+    price_usd = offer_details.get('price_usd')
+    sp_million = offer_details.get('sp_million')
+    ratio_str = ""
+
+    # Calculate and format price per SP ratio
+    if price_usd is not None and sp_million is not None and sp_million > 0:
+        try:
+            price_per_million = price_usd / sp_million
+            ratio_str = f"[${price_per_million:.2f}/M]"
+        except Exception as e:
+             logging.warning(f"Could not calculate price/SP ratio for offer {offer_details['id']}: {e}")
+             pass # Keep ratio_str empty
+
+    # Build the header line with counter and ratio
+    header_line = f"#{item_number}{ratio_str}"
+
+    # Add price change info if applicable
+    if price_change_prefix and offer_details.get('last_price') is not None and price_usd is not None:
+        last_price = offer_details['last_price']
+        header_line += f" ({price_change_prefix}: ${last_price:.2f} -> ${price_usd:.2f})"
+
+
+    offer_body = format_offer_body(offer_details)
+
+    # Return a list of strings representing the complete block for this offer
+    return [header_line, offer_body, ""] # Header, body, blank line below
+
+def append_offer_section(message_parts_list, current_item_counter, offer_list, section_title, section_separator, price_change_prefix=""):
+    """Appends a formatted section of offers to the message parts list. Returns the updated item counter."""
+    if offer_list:
+        message_parts_list.append(f"\n{section_title}")
+        message_parts_list.append(section_separator)
+        item_counter = current_item_counter # Start counting from the passed value
+        for offer in offer_list:
+            item_counter += 1
+            # Use the separate function to get formatted lines for one offer block
+            offer_block_lines = format_offer_block_lines(offer, item_counter, price_change_prefix)
+            message_parts_list.extend(offer_block_lines)
+
+        # Clean up the last blank line added by format_offer_block_lines if it's the very last thing
+        if message_parts_list and message_parts_list[-1] == "":
+            message_parts_list.pop()
+        message_parts_list.append("=" * 15) # Section end
+        return item_counter # Return the counter after processing this section
+    return current_item_counter # Return the same counter if the list was empty
+
 
 # --- Core Scraping Function ---
 def scrape_all_offers_details(url):
@@ -285,8 +336,7 @@ if __name__ == "__main__":
         current_price = current_details.get('price_usd')
         last_price = previous_offer_state.get(offer_id)
 
-        # Always add the current price (if available) to the state for the next run
-        # If current_price is None, it will be saved as None in the state.
+        # Always add the current price (or None if N/A) to the state for the next run
         next_offer_state[offer_id] = current_price
 
         if offer_id not in previous_offer_state:
@@ -299,7 +349,8 @@ if __name__ == "__main__":
                 abs_price_diff = abs(price_diff)
 
                 if abs_price_diff > PRICE_CHANGE_THRESHOLD:
-                    current_details['last_price'] = last_price # Add last price for message formatting
+                    # Add last price to the current details dict for easier formatting later
+                    current_details['last_price'] = last_price
                     if price_diff < 0: # Price decreased
                         logging.info(f"-> Price Decrease: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f})")
                         price_decreased.append(current_details)
@@ -319,6 +370,7 @@ if __name__ == "__main__":
                  # Price was available but is now N/A. Log this warning, state will capture None.
                  logging.warning(f"-> Price is now N/A for {offer_id} (was ${last_price:.2f}). State updated to None.")
 
+
     # 4. Sort the lists by price
     # Sort each list by 'price_usd'. Use float('inf') for None prices to put them last.
     price_sort_key = lambda item: item.get('price_usd', float('inf'))
@@ -334,53 +386,12 @@ if __name__ == "__main__":
     if notification_needed:
         logging.info("Changes detected above threshold, preparing notification message.")
         message_parts = ["FunPay(EVE ECHOES) Update:\n"]
-        item_counter = 0 # Use a single counter for all items
+        item_counter = 0 # Use a single counter for all items in the main block
 
-        def add_offer_to_message(offer_list, section_title, section_separator, price_change_info=""):
-            nonlocal message_parts, item_counter # Access outer scope variables
-            if offer_list:
-                message_parts.append(f"\n{section_title}")
-                message_parts.append(section_separator)
-                for offer in offer_list:
-                    item_counter += 1
-                    price_usd = offer.get('price_usd')
-                    sp_million = offer.get('sp_million')
-                    ratio_str = ""
-                    # Calculate and format price per SP ratio
-                    if price_usd is not None and sp_million is not None and sp_million > 0:
-                        try:
-                            price_per_million = price_usd / sp_million
-                            ratio_str = f" (${price_per_million:.2f}/M SP)"
-                        except Exception as e:
-                             logging.warning(f"Could not calculate price/SP ratio for offer {offer['id']}: {e}")
-                             pass # Keep ratio_str empty
-                    elif sp_million is not None:
-                         # SP is known, but price isn't USD, maybe note SP anyway
-                         # This might be less relevant if price_usd is None, but keeping for flexibility.
-                         ratio_str = f" ({sp_million:.1f}M SP)"
-
-                    formatted_offer_body = format_offer_for_message(offer)
-
-                    # Build the header line with counter and ratio
-                    header_line = f"#{item_counter}{ratio_str}"
-                    if price_change_info and offer.get('last_price') is not None and price_usd is not None:
-                        # Add price change info for decreased/increased sections
-                        last_price = offer['last_price']
-                        header_line += f" ({price_change_info}: ${last_price:.2f} -> ${price_usd:.2f})"
-
-
-                    message_parts.append(header_line)
-                    message_parts.append(formatted_offer_body)
-                    message_parts.append("") # Blank line between offers
-                if message_parts and message_parts[-1] == "": message_parts.pop() # Remove last blank line
-                message_parts.append("=" * 15) # Section end
-
-
-        # Add sections to message parts
-        add_offer_to_message(new_offers, "✨ New Offers:", "-" * 15)
-        add_offer_to_message(price_decreased, "💲⬇️ Price Decreases:", "-" * 10, price_change_info="⬇️")
-        add_offer_to_message(price_increased, "💲⬆️ Price Increases:", "-" * 10, price_change_info="⬆️")
-
+        # Append sections to message parts using the independent helper function
+        item_counter = append_offer_section(message_parts, item_counter, new_offers, "✨ New Offers:", "-" * 15)
+        item_counter = append_offer_section(message_parts, item_counter, price_decreased, "💲⬇️ Price Decreases:", "-" * 10, price_change_prefix="⬇️")
+        item_counter = append_offer_section(message_parts, item_counter, price_increased, "💲⬆️ Price Increases:", "-" * 10, price_change_prefix="⬆️")
 
         full_message = "\n".join(message_parts)
 
