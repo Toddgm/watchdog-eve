@@ -1,3 +1,5 @@
+--- START OF FILE funpay_scraper_v5.py ---
+
 import requests
 from bs4 import BeautifulSoup
 import time
@@ -12,11 +14,11 @@ import sys
 URL = "https://funpay.com/en/lots/687/"
 OFFER_STATE_FILE = "offer_state.json" # Stores {offer_id: last_price}
 PRICE_CHANGE_THRESHOLD = 5.00 # Ignore price changes <= this value (in USD)
-# INCLUDE_PRICE_INCREASES_IN_MSG = False # Set to True if you want to see price increases too
+# INCLUDE_PRICE_INCREASES_IN_MSG = False # Set to True if you want to see price increases too (Currently ON)
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,application/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
     'Accept-Language': 'en-US,en;q=0.9',
     'Referer': 'https://funpay.com/en/',
 }
@@ -29,7 +31,6 @@ DESCRIPTION_TRUNCATE_LENGTH = 90 # Max chars for description in message
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Helper Functions ---
-# (load_offer_state, save_offer_state, extract_offer_id_from_href, extract_sp_from_description - unchanged)
 def load_offer_state(filename):
     """Loads offer state ({offer_id: last_price}) from a JSON file."""
     offer_state = {}
@@ -40,9 +41,11 @@ def load_offer_state(filename):
         with open(filename, 'r', encoding='utf-8') as f:
             offer_state = json.load(f)
         validated_state = {}
+        # Ensure IDs are strings and prices are floats or None
         for offer_id, price in offer_state.items():
-             if isinstance(price, (int, float)):
-                 validated_state[str(offer_id)] = float(price)
+             if isinstance(price, (int, float, type(None))):
+                 # Convert int/float to float, keep None as None
+                 validated_state[str(offer_id)] = float(price) if isinstance(price, (int, float)) else None
              else:
                  logging.warning(f"Invalid price type '{type(price)}' for ID {offer_id} in state file. Skipping.")
         logging.info(f"Loaded state for {len(validated_state)} offers from '{filename}'.")
@@ -53,10 +56,18 @@ def load_offer_state(filename):
 
 def save_offer_state(filename, current_state):
     """Saves the current offer state ({offer_id: current_price}) to a JSON file."""
+    # Ensure only valid price entries are saved (float or None)
+    state_to_save = {}
+    for offer_id, price in current_state.items():
+         if isinstance(price, (int, float, type(None))): # Allow None price in state file
+             state_to_save[str(offer_id)] = float(price) if isinstance(price, (int, float)) else None
+         else:
+             logging.warning(f"Attempted to save invalid price type '{type(price)}' for ID {offer_id}. Skipping.")
+
     try:
         with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(current_state, f, indent=2, ensure_ascii=False)
-        logging.info(f"Successfully saved state for {len(current_state)} offers to '{filename}'.")
+            json.dump(state_to_save, f, indent=2, ensure_ascii=False)
+        logging.info(f"Successfully saved state for {len(state_to_save)} offers to '{filename}'.")
     except Exception as e:
         logging.error(f"Error writing state file '{filename}': {e}")
 
@@ -73,36 +84,60 @@ def extract_offer_id_from_href(href):
     return None
 
 def extract_sp_from_description(description):
-    """Attempts to extract Skill Points (in millions) from the description text."""
-    description_lower = description.lower()
-    patterns = [
-        r'(\d+(?:\.\d+)?)\s*(?:m|mil|million)\s*sp',
-        r'sp\s*(\d+(?:\.\d+)?)\s*(?:m|mil|million)',
-        r'(\d+(?:\.\d+)?)\s*sp'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, description_lower)
-        if match:
-            potential_k_context = description_lower[max(0, match.start()-5):min(len(description_lower), match.end()+5)]
-            is_thousand = False
-            if 'k sp' in potential_k_context or 'k ' in potential_k_context: is_thousand = True
-            if match.start(1) > 0 and description_lower[match.start(1)-1:match.start(1)] == 'k': is_thousand = True
-            if is_thousand: continue
-            try: return float(match.group(1))
-            except (ValueError, IndexError): continue
-    return None
+    """Attempts to extract Skill Points (in millions) strictly from the end of the description."""
+    if not description: return None
+    # Remove commas and leading/trailing whitespace for consistent processing
+    description_lower = description.lower().replace(',', '').strip()
+
+    # Pattern: Looks for optional leading space/comma, then number, strictly " m sp", optional trailing space, END
+    # Example matches: ", 100 m sp", "120 m sp", " 50.5 m sp"
+    # This pattern is anchored to the end ($) and specifically looks for the " m sp" unit.
+    strict_end_pattern = r'[\s,]*(\d+(?:\.\d+)?)\s*m\s*sp\s*$'
+
+    match = re.search(strict_end_pattern, description_lower)
+
+    if match:
+        sp_value_str = match.group(1)
+        try:
+            # Based on the strict rule, the number preceding "m sp" is the SP in millions.
+            return float(sp_value_str)
+        except ValueError:
+            logging.warning(f"Could not convert extracted strict end-SP value '{sp_value_str}' to float.")
+            return None # If conversion fails, it's not a valid SP number
+    else:
+        logging.debug(f"Strict 'X m SP' pattern not found at end of description: '{description}'")
+        return None # Pattern not found
 
 def format_offer_for_message(offer_details):
-    """Formats the details of a single offer for the Telegram message."""
-    # (Unchanged)
+    """Formats the details of a single offer for the Telegram message body."""
     desc = ' '.join(offer_details['description'].split())
+    # Ensure truncation doesn't cut the critical 'X m SP' part if possible, but still truncate long descriptions
+    # Simple approach: just truncate from the start if needed, the SP is at the end anyway.
     if len(desc) > DESCRIPTION_TRUNCATE_LENGTH:
-        desc = desc[:DESCRIPTION_TRUNCATE_LENGTH] + "..."
+        # Find the last occurrence of " m SP"
+        sp_match = re.search(r'\d+(?:\.\d+)?\s*m\s*sp\s*$', desc.lower())
+        if sp_match:
+             # Keep the end of the description including the SP part, and truncate the beginning
+             keep_length = len(desc) - sp_match.start() # Length from start of SP match to end
+             if keep_length < DESCRIPTION_TRUNCATE_LENGTH:
+                  # Truncate the beginning, ensuring we keep the SP part
+                  truncate_point = DESCRIPTION_TRUNCATE_LENGTH - keep_length
+                  desc = "..." + desc[-truncate_point - keep_length:] # Keep enough characters from end + SP part
+             else:
+                 # If the SP part itself is longer than or equal to the truncation length,
+                 # just show the SP part with preceding "..." if needed.
+                 desc = "..." + desc[sp_match.start():]
+
+        else:
+             # Fallback to simple truncation if SP pattern not found (shouldn't happen based on strict rule)
+             desc = desc[:DESCRIPTION_TRUNCATE_LENGTH] + "..."
     else:
-        desc = desc
+        desc = desc # Keep full description if short enough
+
     price_str = f"${offer_details['price_usd']:.2f}" if offer_details['price_usd'] is not None else offer_details['price_text']
     sp_str = f"{offer_details['sp_million']:.1f}M SP" if offer_details['sp_million'] is not None else "SP N/A"
     link = offer_details.get('href', f"https://funpay.com/en/lots/offer?id={offer_details['id']}")
+
     lines = [
         f"Desc: {desc}",
         f"Price: {price_str}",
@@ -114,7 +149,6 @@ def format_offer_for_message(offer_details):
 # --- Core Scraping Function ---
 def scrape_all_offers_details(url):
     """Scrapes ALL offers, returning dict {id: details} or None on failure."""
-    # (Unchanged)
     logging.info(f"Attempting to fetch and parse ALL offers from: {url}")
     all_offers_details = {}
     try:
@@ -126,12 +160,14 @@ def scrape_all_offers_details(url):
         soup = BeautifulSoup(response.text, 'html.parser')
         offer_containers = soup.find_all('a', class_='tc-item')
         logging.info(f"Found {len(offer_containers)} potential offer containers.")
-        if not offer_containers: return {}
+        if not offer_containers:
+            logging.warning("No offer containers found on the page.")
+            return {} # Return empty dict if no offers but request was successful
 
         for container in offer_containers:
             href = container.get('href')
             offer_id = extract_offer_id_from_href(href)
-            if not offer_id: continue
+            if not offer_id: continue # Skip if ID can't be extracted
 
             desc_tag = container.find('div', class_='tc-desc-text')
             description = desc_tag.get_text(separator=' ', strip=True) if desc_tag else "N/A"
@@ -140,15 +176,21 @@ def scrape_all_offers_details(url):
             price_container_tag = container.find('div', class_='tc-price')
             price_text = price_container_tag.get_text(strip=True) if price_container_tag else "N/A"
             price_usd = None
-            if price_text != "N/A":
-                try:
-                    price_match = re.search(r'[\$€£]?\s?(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)', price_text.replace(',', ''))
-                    if price_match: price_usd = float(price_match.group(1))
-                    else:
-                        fallback_match = re.search(r'(\d+\.?\d*)', price_text)
-                        if fallback_match: price_usd = float(fallback_match.group(1))
-                except ValueError:
-                    logging.warning(f"Offer ID {offer_id}: Could not parse price '{price_text}'")
+            # Attempt to parse price. Funpay prices can be complex.
+            # This pattern tries to find a number with optional thousands separators/decimals near currency symbols
+            # or just a plain number. Removes spaces and commas before parsing.
+            cleaned_price_text = price_text.replace(' ', '').replace(',', '').replace('$', '').replace('€', '').replace('£', '')
+            try:
+                # Use a simple float conversion after cleaning, assuming the first number is the price
+                price_match = re.search(r'(\d+\.?\d*)', cleaned_price_text)
+                if price_match:
+                     price_usd = float(price_match.group(1))
+                # else price_usd remains None
+            except ValueError:
+                 logging.warning(f"Offer ID {offer_id}: Could not convert parsed price string '{price_match.group(1) if price_match else cleaned_price_text}' to float from text '{price_text}'")
+            except Exception as e:
+                 logging.warning(f"Offer ID {offer_id}: Unexpected error parsing price '{price_text}': {e}")
+
 
             extracted_sp = extract_sp_from_description(description)
 
@@ -163,26 +205,30 @@ def scrape_all_offers_details(url):
         logging.error(f"Network/Request Error during scraping: {e}")
     except Exception as e:
         logging.error(f"Unexpected error during scraping: {e}")
-    return None
+    return None # Return None on critical failure
 
 # --- Telegram Notification Function ---
 def send_telegram_notification(bot_token, chat_id, message_text):
     """Sends the provided message text to Telegram."""
-    # (Unchanged)
     if not message_text:
         logging.info("No message content provided to send notification.")
         return False
     if not bot_token or not chat_id:
         logging.error("Telegram Bot Token or Chat ID is missing.")
         return False
-    if len(message_text.encode('utf-8')) > TELEGRAM_MAX_MSG_LENGTH:
+    # Encode and check byte length before truncating
+    message_bytes = message_text.encode('utf-8')
+    if len(message_bytes) > TELEGRAM_MAX_MSG_LENGTH:
         logging.warning(f"Message length exceeds limit ({TELEGRAM_MAX_MSG_LENGTH} bytes). Truncating.")
-        message_bytes = message_text.encode('utf-8')
-        message_bytes = message_bytes[:TELEGRAM_MAX_MSG_LENGTH - 20]
-        message_text = message_bytes.decode('utf-8', 'ignore') + "\n... (message truncated)"
+        # Truncate by bytes, then decode. Leave space for the truncation message.
+        truncated_bytes = message_bytes[:TELEGRAM_MAX_MSG_LENGTH - 30].decode('utf-8', 'ignore').encode('utf-8')
+        message_text = truncated_bytes.decode('utf-8', 'ignore') + "\n... (truncated)"
+
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    # Using simple text mode to avoid Markdown escaping issues
     params = {'chat_id': chat_id, 'text': message_text, 'disable_web_page_preview': 'true'}
+
     try:
         logging.info(f"Sending notification to Telegram chat ID ending in ...{chat_id[-4:]}")
         response = requests.post(url, data=params, timeout=15)
@@ -194,6 +240,7 @@ def send_telegram_notification(bot_token, chat_id, message_text):
         else:
             error_desc = response_data.get("description", "Unknown error")
             logging.error(f"Telegram API Error: {error_desc}")
+            logging.error(f"Attempted message start: {message_text[:200]}...")
             return False
     except Exception as e:
         logging.error(f"Error sending Telegram notification: {e}")
@@ -223,90 +270,119 @@ if __name__ == "__main__":
 
     if current_offers_details is None:
         logging.error("Scraping failed. Exiting.")
+        # Do NOT save state if scraping failed
         sys.exit("Exiting: Scraping function failed.")
 
     # 3. Compare current offers with previous state
     new_offers = []
     price_decreased = []
     price_increased = []
+
+    # Prepare the state for the *next* run. This will contain *all* currently found offers with their *latest* prices.
+    # Offers from previous_offer_state that are *not* in current_offers_details are implicitly removed from tracking state.
     next_offer_state = {}
 
+    logging.info("Comparing current offers to previous state...")
     for offer_id, current_details in current_offers_details.items():
         current_price = current_details.get('price_usd')
-        if current_price is not None:
-            next_offer_state[offer_id] = current_price
+        last_price = previous_offer_state.get(offer_id)
+
+        # Always add the current price (if available) to the state for the next run
+        # If current_price is None, it will be saved as None in the state.
+        next_offer_state[offer_id] = current_price
 
         if offer_id not in previous_offer_state:
-            logging.info(f"-> New Offer ID: {offer_id}")
+            logging.info(f"-> Found New Offer: {offer_id}")
             new_offers.append(current_details)
         else:
-            last_price = previous_offer_state.get(offer_id)
+            # Offer exists in previous state, check for price change
             if current_price is not None and last_price is not None:
-                price_diff = abs(current_price - last_price)
-                if price_diff > PRICE_CHANGE_THRESHOLD:
-                    if current_price < last_price:
-                        logging.info(f"-> Price Decrease ID: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${price_diff:.2f})")
-                        current_details['last_price'] = last_price
+                price_diff = current_price - last_price
+                abs_price_diff = abs(price_diff)
+
+                if abs_price_diff > PRICE_CHANGE_THRESHOLD:
+                    current_details['last_price'] = last_price # Add last price for message formatting
+                    if price_diff < 0: # Price decreased
+                        logging.info(f"-> Price Decrease: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f})")
                         price_decreased.append(current_details)
-                    elif current_price > last_price:
-                         logging.info(f"-> Price Increase ID: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${price_diff:.2f})")
-                         current_details['last_price'] = last_price
+                    elif price_diff > 0: # Price increased
+                         logging.info(f"-> Price Increase: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f})")
                          price_increased.append(current_details)
+                else:
+                    # Price change is below the threshold
+                    logging.info(f"-> Price change below threshold for {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f}). Ignoring notification.")
+                    # Offer's new price is correctly captured in next_offer_state above, but no notification is sent this run.
+            elif current_price is not None and last_price is None:
+                 # Price wasn't available last time but is now available and numeric.
+                 # Treat this as a new offer to highlight it.
+                 logging.info(f"-> Price now available for {offer_id} (previously N/A): ${current_price:.2f}. Notifying as new.")
+                 new_offers.append(current_details) # Add to new_offers list
+            elif current_price is None and last_price is not None:
+                 # Price was available but is now N/A. Log this warning, state will capture None.
+                 logging.warning(f"-> Price is now N/A for {offer_id} (was ${last_price:.2f}). State updated to None.")
 
-
-    # --- >>> ADD SORTING LOGIC HERE <<< ---
+    # 4. Sort the lists by price
     # Sort each list by 'price_usd'. Use float('inf') for None prices to put them last.
     price_sort_key = lambda item: item.get('price_usd', float('inf'))
     new_offers.sort(key=price_sort_key)
     price_decreased.sort(key=price_sort_key)
     price_increased.sort(key=price_sort_key)
-    logging.info("Sorted offer lists by price (ascending, None last).")
-    # --- End of Sorting Logic ---
+    logging.info(f"Sorted {len(new_offers)} new offers, {len(price_decreased)} decreased, {len(price_increased)} increased by price (ascending).")
 
-
-    # 4. Format and Send Notification (if anything changed)
+    # 5. Format and Send Notification (if anything changed significantly)
     notification_needed = bool(new_offers or price_decreased or price_increased)
     notification_sent = False
 
     if notification_needed:
-        logging.info("Changes detected, preparing notification message.")
+        logging.info("Changes detected above threshold, preparing notification message.")
         message_parts = ["FunPay(EVE ECHOES) Update:\n"]
         item_counter = 0 # Use a single counter for all items
 
-        if new_offers:
-            message_parts.append("✨ New Offers:")
-            message_parts.append("-" * 15) # Separator
-            for offer in new_offers: # Iterate sorted list
-                item_counter += 1
-                formatted_offer = format_offer_for_message(offer)
-                message_parts.append(f"#{item_counter}\n{formatted_offer}")
-                message_parts.append("") # Blank line between offers
-            if message_parts[-1] == "": message_parts.pop()
-            message_parts.append("=" * 15) # Section end
+        def add_offer_to_message(offer_list, section_title, section_separator, price_change_info=""):
+            nonlocal message_parts, item_counter # Access outer scope variables
+            if offer_list:
+                message_parts.append(f"\n{section_title}")
+                message_parts.append(section_separator)
+                for offer in offer_list:
+                    item_counter += 1
+                    price_usd = offer.get('price_usd')
+                    sp_million = offer.get('sp_million')
+                    ratio_str = ""
+                    # Calculate and format price per SP ratio
+                    if price_usd is not None and sp_million is not None and sp_million > 0:
+                        try:
+                            price_per_million = price_usd / sp_million
+                            ratio_str = f" (${price_per_million:.2f}/M SP)"
+                        except Exception as e:
+                             logging.warning(f"Could not calculate price/SP ratio for offer {offer['id']}: {e}")
+                             pass # Keep ratio_str empty
+                    elif sp_million is not None:
+                         # SP is known, but price isn't USD, maybe note SP anyway
+                         # This might be less relevant if price_usd is None, but keeping for flexibility.
+                         ratio_str = f" ({sp_million:.1f}M SP)"
 
-        if price_decreased:
-            message_parts.append("\n💲⬇️")
-            message_parts.append("-" * 10)
-            for offer in price_decreased: # Iterate sorted list
-                item_counter += 1
-                formatted_offer = format_offer_for_message(offer)
-                price_change_line = f"Price (⬇️): ${offer['last_price']:.2f} -> ${offer['price_usd']:.2f} "
-                message_parts.append(f"#{item_counter}\n{price_change_line}\n{formatted_offer}")
-                message_parts.append("")
-            if message_parts[-1] == "": message_parts.pop()
-            message_parts.append("=" * 15)
+                    formatted_offer_body = format_offer_for_message(offer)
 
-        if price_increased: # Check flag if you add it back
-            message_parts.append("\n💲⬆️")
-            message_parts.append("-" * 10)
-            for offer in price_increased: # Iterate sorted list
-                item_counter += 1
-                formatted_offer = format_offer_for_message(offer)
-                price_change_line = f"Price (⬆️): ${offer['last_price']:.2f} -> ${offer['price_usd']:.2f}"
-                message_parts.append(f"#{item_counter}\n{price_change_line}\n{formatted_offer}")
-                message_parts.append("")
-            if message_parts[-1] == "": message_parts.pop()
-            message_parts.append("*" * 15)
+                    # Build the header line with counter and ratio
+                    header_line = f"#{item_counter}{ratio_str}"
+                    if price_change_info and offer.get('last_price') is not None and price_usd is not None:
+                        # Add price change info for decreased/increased sections
+                        last_price = offer['last_price']
+                        header_line += f" ({price_change_info}: ${last_price:.2f} -> ${price_usd:.2f})"
+
+
+                    message_parts.append(header_line)
+                    message_parts.append(formatted_offer_body)
+                    message_parts.append("") # Blank line between offers
+                if message_parts and message_parts[-1] == "": message_parts.pop() # Remove last blank line
+                message_parts.append("=" * 15) # Section end
+
+
+        # Add sections to message parts
+        add_offer_to_message(new_offers, "✨ New Offers:", "-" * 15)
+        add_offer_to_message(price_decreased, "💲⬇️ Price Decreases:", "-" * 10, price_change_info="⬇️")
+        add_offer_to_message(price_increased, "💲⬆️ Price Increases:", "-" * 10, price_change_info="⬆️")
+
 
         full_message = "\n".join(message_parts)
 
@@ -318,7 +394,10 @@ if __name__ == "__main__":
     else:
         logging.info("No new offers or significant price changes detected.")
 
-    # 5. Save the *current* state to the file for the next run
+    # 6. Save the *current* state to the file for the next run
+    # This state includes the latest prices (or None) for all currently scraped offers.
+    # It correctly handles offers with price changes below threshold (updates state, no notify)
+    # and offers that were removed (implicitly removed from state).
     save_offer_state(OFFER_STATE_FILE, next_offer_state)
 
     end_time = time.time()
