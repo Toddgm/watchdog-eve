@@ -1,18 +1,18 @@
 # .github/workflows/scrape.yml
-name: FunPay Scraper v2.0
+name: FunPay Scraper v3.0
 
 on:
   schedule:
-    # Run every hour
+    # Run every two hours
     - cron: "0 */2 * * *"
   workflow_dispatch: # Allow manual trigger
 
 jobs:
-  scrape-track-notify-python: # Renamed job slightly
+  scrape-price-track-notify:
     runs-on: ubuntu-latest
     steps:
       # STEP 1: Checkout repository
-      # Needed for script AND processed_ids.txt
+      # Needed for script AND offer_state.json
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -24,33 +24,33 @@ jobs:
 
       # STEP 3: Install Python dependencies
       - name: Install Python dependencies
-        run: pip install requests beautifulsoup4 lxml # urllib is standard
+        run: pip install requests beautifulsoup4 lxml # json/urllib are standard
 
       # STEP 4: Run the scraper script
-      # Python script now handles scraping, ID comparison, Telegram notification, and ID appending
+      # Python script handles all logic: load state, scrape, compare, notify, prepare next state
       - name: Run Python Scraper & Notifier
         env: # Pass secrets as environment variables to the Python script
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          echo "Running funpay_scraper.py (Python handles logic)..."
-          python funpay_scraper_v2.py
-          # Log status of the persistent ID file for verification
-          echo "--- Processed IDs file status after script run ---"
-          ls -l processed_ids.txt || echo "processed_ids.txt does not exist yet."
+          echo "Running funpay_scraper.py (price tracking)..."
+          python funpay_scraper_v3.py
+          # Log status of the state file for verification
+          echo "--- Offer State file status after script run ---"
+          ls -l offer_state.json || echo "offer_state.json does not exist yet."
 
-      # STEP 5: Commit updated processed IDs file if changed
-      # This is CRUCIAL for remembering processed offers between runs
-      - name: Commit processed IDs file
+      # STEP 5: Commit updated offer state file if changed
+      # This is CRUCIAL for remembering prices between runs
+      - name: Commit offer state file
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          # Add the file specifically. Python script may have created or appended to it.
-          git add processed_ids.txt
-          # Check if the file was actually changed or newly added (staged changes exist)
-          if ! git diff --staged --quiet -- processed_ids.txt; then
-            echo "Committing changes to processed_ids.txt..."
-            git commit -m "Update processed offer IDs ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
+          # Add the state file specifically. Python script overwrites it.
+          git add offer_state.json
+          # Check if the file was actually changed or newly added
+          if ! git diff --staged --quiet -- offer_state.json; then
+            echo "Committing changes to offer_state.json..."
+            git commit -m "Update offer price state ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
             # Add retry logic for push
             retry_count=0
             max_retries=3
@@ -67,10 +67,10 @@ jobs:
               fi
             done
             if ! $push_success; then
-              echo "Error: Failed to push processed_ids.txt after $max_retries retries."
+              echo "Error: Failed to push offer_state.json after $max_retries retries."
               exit 1
             fi
-            echo "Committed and pushed changes to processed_ids.txt"
+            echo "Committed and pushed changes to offer_state.json"
           else
-            echo "No changes detected in processed_ids.txt. Nothing to commit."
+            echo "No changes detected in offer_state.json. Nothing to commit."
           fi
