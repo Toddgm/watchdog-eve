@@ -7,8 +7,8 @@ import os
 import json # For handling state file
 from urllib.parse import urlparse, parse_qs
 import sys
-from dotenv import load_dotenv
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 
 # --- Configuration ---
 URL = "https://funpay.com/en/lots/687/"
