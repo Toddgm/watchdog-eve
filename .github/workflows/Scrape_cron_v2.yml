@@ -1,5 +1,5 @@
 # .github/workflows/scrape.yml
-name: FunPay Scraper (Python Logic & Notify New)
+name: FunPay Scraper v2.0
 
 on:
   schedule:
@@ -34,7 +34,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           echo "Running funpay_scraper.py (Python handles logic)..."
-          python funpay_scraper.py
+          python funpay_scraper_v2.py
           # Log status of the persistent ID file for verification
           echo "--- Processed IDs file status after script run ---"
           ls -l processed_ids.txt || echo "processed_ids.txt does not exist yet."
