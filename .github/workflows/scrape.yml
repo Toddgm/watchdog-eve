@@ -3,7 +3,7 @@ name: FunPay Scraper (ID Tracking & Notify New)
 on:
   schedule:
     # Run every hour
-    - cron: "0 */2 * * *"
+    # - cron: "0 */2 * * *"
   workflow_dispatch: # Allow manual trigger
 
 jobs:
