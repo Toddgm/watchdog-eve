@@ -1,0 +1,76 @@
+# .github/workflows/scrape.yml
+name: FunPay Scraper (Python Logic & Notify New)
+
+on:
+  schedule:
+    # Run every hour
+    - cron: "0 */2 * * *"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  scrape-track-notify-python: # Renamed job slightly
+    runs-on: ubuntu-latest
+    steps:
+      # STEP 1: Checkout repository
+      # Needed for script AND processed_ids.txt
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # STEP 2: Setup Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      # STEP 3: Install Python dependencies
+      - name: Install Python dependencies
+        run: pip install requests beautifulsoup4 lxml # urllib is standard
+
+      # STEP 4: Run the scraper script
+      # Python script now handles scraping, ID comparison, Telegram notification, and ID appending
+      - name: Run Python Scraper & Notifier
+        env: # Pass secrets as environment variables to the Python script
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          echo "Running funpay_scraper.py (Python handles logic)..."
+          python funpay_scraper.py
+          # Log status of the persistent ID file for verification
+          echo "--- Processed IDs file status after script run ---"
+          ls -l processed_ids.txt || echo "processed_ids.txt does not exist yet."
+
+      # STEP 5: Commit updated processed IDs file if changed
+      # This is CRUCIAL for remembering processed offers between runs
+      - name: Commit processed IDs file
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          # Add the file specifically. Python script may have created or appended to it.
+          git add processed_ids.txt
+          # Check if the file was actually changed or newly added (staged changes exist)
+          if ! git diff --staged --quiet -- processed_ids.txt; then
+            echo "Committing changes to processed_ids.txt..."
+            git commit -m "Update processed offer IDs ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
+            # Add retry logic for push
+            retry_count=0
+            max_retries=3
+            push_success=false
+            until $push_success || [ $retry_count -eq $max_retries ]; do
+              retry_count=$((retry_count+1))
+              if git push; then
+                push_success=true
+                echo "Push successful."
+              else
+                echo "Push failed. Retrying (${retry_count}/${max_retries})..."
+                sleep 5
+                rm -f .git/index.lock || true
+              fi
+            done
+            if ! $push_success; then
+              echo "Error: Failed to push processed_ids.txt after $max_retries retries."
+              exit 1
+            fi
+            echo "Committed and pushed changes to processed_ids.txt"
+          else
+            echo "No changes detected in processed_ids.txt. Nothing to commit."
+          fi
