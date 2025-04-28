@@ -1,5 +1,3 @@
---- START OF FILE funpay_scraper_v5.py ---
-
 import requests
 from bs4 import BeautifulSoup
 import time
