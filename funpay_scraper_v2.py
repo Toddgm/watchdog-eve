@@ -191,9 +191,9 @@ def send_telegram_notification(bot_token, chat_id, new_offers_details_list):
     message_lines = [f"🚨 {len(new_offers_details_list)} New FunPay Offers Found! 🚨\n"]
 
     for i, offer in enumerate(new_offers_details_list):
-        message_lines.append(f"#{i+1} (ID: {offer['id']})")
-        desc = ' '.join(offer['description'].split())[:150] # Limit description length
-        message_lines.append(f"  Desc: {desc}{'...' if len(offer['description']) > 150 else ''}")
+        message_lines.append(f"#{i+1}")
+        desc = ' '.join(offer['description'].split())[:100] # Limit description length
+        message_lines.append(f"  Desc: {desc}{'...' if len(offer['description']) > 100 else ''}")
         message_lines.append(f"  Seller: {offer['seller']}")
         price_str = f"${offer['price_usd']:.2f}" if offer['price_usd'] is not None else offer['price_text']
         message_lines.append(f"  Price: {price_str}")
