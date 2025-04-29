@@ -3,8 +3,8 @@ name: FunPay Scraper v3.0
 
 on:
   schedule:
-    # Run every two hours
-    - cron: "0 */2 * * *"
+    # Run every hours
+    - cron: "0 */1 * * *"
   workflow_dispatch: # Allow manual trigger
 
 jobs:
