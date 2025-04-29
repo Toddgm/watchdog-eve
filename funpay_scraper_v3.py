@@ -7,8 +7,9 @@ import os
 import json # For handling state file
 from urllib.parse import urlparse, parse_qs
 import sys
-# from dotenv import load_dotenv
-# load_dotenv()
+from dotenv import load_dotenv
+if os.path.exists('.env'):
+    load_dotenv()
 
 # --- Configuration ---
 URL = "https://funpay.com/en/lots/687/"
@@ -26,7 +27,10 @@ REQUEST_DELAY_SECONDS = 2
 REQUEST_TIMEOUT = 20
 TELEGRAM_MAX_MSG_LENGTH = 4096
 DESCRIPTION_TRUNCATE_LENGTH = 90 # Max chars for description in message
-
+# Add cookie to force USD currency display
+COOKIES = {
+    'cy': 'USD'
+}
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -135,7 +139,7 @@ def format_offer_body(offer_details):
     # else: desc remains as is if short enough
 
     price_str = f"${offer_details['price_usd']:.2f}" if offer_details['price_usd'] is not None else offer_details.get('price_text', 'Price N/A')
-    sp_str = f"{offer_details['sp_million']:.1f}M SP" if offer_details['sp_million'] is not None else "SP N/A"
+    sp_str = f"{offer_details['sp_million']:.1f}mil" if offer_details['sp_million'] is not None else "SP N/A"
     link = offer_details.get('href', f"https://funpay.com/en/lots/offer?id={offer_details['id']}")
 
     lines = [
@@ -156,7 +160,7 @@ def format_offer_block_lines(offer_details, item_number, price_change_prefix="")
     if price_usd is not None and sp_million is not None and sp_million > 0:
         try:
             price_per_million = price_usd / sp_million
-            ratio_str = f"[${price_per_million:.2f}/M]"
+            ratio_str = f" [${price_per_million:.2f}/mil]"
         except Exception as e:
              logging.warning(f"Could not calculate price/SP ratio for offer {offer_details['id']}: {e}")
              pass # Keep ratio_str empty
@@ -203,7 +207,9 @@ def scrape_all_offers_details(url):
     try:
         logging.info(f"Waiting {REQUEST_DELAY_SECONDS} seconds...")
         time.sleep(REQUEST_DELAY_SECONDS)
-        response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+         # ADDED: Pass the COOKIES dictionary to the requests.get call
+        logging.info("Adding cookie 'cy=USD' to request.")
+        response = requests.get(url, headers=HEADERS, cookies=COOKIES, timeout=REQUEST_TIMEOUT)
         logging.info(f"Response status code: {response.status_code}")
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -385,7 +391,7 @@ if __name__ == "__main__":
 
     if notification_needed:
         logging.info("Changes detected above threshold, preparing notification message.")
-        message_parts = ["FunPay(EVE ECHOES) Update:\n"]
+        message_parts = ["FunPay(EVE ECHOES) Update:"]
         item_counter = 0 # Use a single counter for all items in the main block
 
         # Append sections to message parts using the independent helper function
