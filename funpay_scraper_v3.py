@@ -88,13 +88,16 @@ def extract_offer_id_from_href(href):
     return None
 
 def extract_sp_from_description(description):
-    """Attempts to extract Skill Points (in millions) strictly from the end of the description."""
+    """
+    Attempts to extract Skill Points (in millions) strictly from the end of the description.
+    Includes a sanity check for very large numbers.
+    """
     if not description: return None
     # Remove commas and leading/trailing whitespace for consistent processing
     description_lower = description.lower().replace(',', '').strip()
 
     # Pattern: Looks for optional leading space/comma, then number, strictly " m sp", optional trailing space, END
-    # Example matches: ", 100 m sp", "120 m sp", " 50.5 m sp"
+    # Example matches: ", 100 m sp", "120 m sp", " 50.5 m sp", "1234500 m sp"
     # This pattern is anchored to the end ($) and specifically looks for the " m sp" unit.
     strict_end_pattern = r'[\s,]*(\d+(?:\.\d+)?)\s*m\s*sp\s*$'
 
@@ -103,15 +106,29 @@ def extract_sp_from_description(description):
     if match:
         sp_value_str = match.group(1)
         try:
+            sp_value = float(sp_value_str)
+            
+            # --- ADDED SANITY CHECK ---
+            # If the extracted number is very large (e.g., > 1000), assume it was meant to be raw SP
+            # and the "m sp" was added incorrectly. Convert it to millions.
+            SANITY_CHECK_THRESHOLD = 1000 # If extracted number is > 1000, it's probably not M SP
+            if sp_value > SANITY_CHECK_THRESHOLD:
+                 corrected_sp_value = sp_value / 1_000_000.0 # Divide by one million
+                 logging.warning(
+                     f"Extracted large SP value '{sp_value_str}' from description ending '{match.group(0)}'. "
+                     f"Assuming raw SP and converting to {corrected_sp_value:.2f}M SP."
+                 )
+                 return corrected_sp_value
+            # --- END SANITY CHECK ---
+
             # Based on the strict rule, the number preceding "m sp" is the SP in millions.
-            return float(sp_value_str)
+            return sp_value
         except ValueError:
             logging.warning(f"Could not convert extracted strict end-SP value '{sp_value_str}' to float.")
             return None # If conversion fails, it's not a valid SP number
     else:
         logging.debug(f"Strict 'X m SP' pattern not found at end of description: '{description}'")
         return None # Pattern not found
-
 
 def format_offer_body(offer_details):
     """Formats the core details of a single offer (description, price, sp, link) for the message."""
