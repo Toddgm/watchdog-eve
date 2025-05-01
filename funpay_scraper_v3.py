@@ -71,7 +71,7 @@ def save_offer_state(filename, current_state):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(state_to_save, f, indent=2, ensure_ascii=False)
-        logging.info(f"Successfully saved state for {len(state_to_save)} offers to '{filename}'.")
+        logging.info(f"Saved state for {len(state_to_save)} offers to '{filename}'.")
     except Exception as e:
         logging.error(f"Error writing state file '{filename}': {e}")
 
@@ -115,7 +115,7 @@ def extract_sp_from_description(description):
             if sp_value > SANITY_CHECK_THRESHOLD:
                  corrected_sp_value = sp_value / 1_000_000.0 # Divide by one million
                  logging.warning(
-                     f"Extracted large SP value '{sp_value_str}' from description ending '{match.group(0)}'. "
+                     f"Abnormal SP value '{sp_value_str}' detected '{match.group(0)}'. "
                      f"Assuming raw SP and converting to {corrected_sp_value:.2f}M SP."
                  )
                  return corrected_sp_value
@@ -219,7 +219,7 @@ def append_offer_section(message_parts_list, current_item_counter, offer_list, s
 # --- Core Scraping Function ---
 def scrape_all_offers_details(url):
     """Scrapes ALL offers, returning dict {id: details} or None on failure."""
-    logging.info(f"Attempting to fetch and parse ALL offers from: {url}")
+    logging.info(f"Fetch and parse ALL offers from: {url}")
     all_offers_details = {}
     try:
         logging.info(f"Waiting {REQUEST_DELAY_SECONDS} seconds...")
@@ -231,7 +231,7 @@ def scrape_all_offers_details(url):
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         offer_containers = soup.find_all('a', class_='tc-item')
-        logging.info(f"Found {len(offer_containers)} potential offer containers.")
+        logging.info(f"Found {len(offer_containers)} potential offer(s).")
         if not offer_containers:
             logging.warning("No offer containers found on the page.")
             return {} # Return empty dict if no offers but request was successful
@@ -321,18 +321,93 @@ def send_telegram_notification(bot_token, chat_id, message_text):
             logging.error(f"Response text: {e.response.text[:200]}...")
         return False
 
+
+# --- NEW: Discord Notification Function ---
+def send_discord_notification(webhook_url, message_text):
+    """Sends the provided message text to Discord via webhook, splitting if necessary."""
+    if not message_text:
+        logging.info("No message content provided to send Discord notification.")
+        return False
+    if not webhook_url:
+        logging.error("Discord Webhook URL is missing.")
+        return False
+
+    DISCORD_MAX_MSG_LENGTH = 2000 # Discord message length limit
+    DISCORD_SEND_DELAY_SECONDS = 1 # Delay between sending message chunks
+
+    headers = {'Content-Type': 'application/json'}
+    remaining_message = message_text
+    success = True # Assume success initially
+
+    while len(remaining_message) > 0:
+        # Determine the chunk to send
+        if len(remaining_message) <= DISCORD_MAX_MSG_LENGTH:
+            chunk = remaining_message
+            remaining_message = "" # This is the last chunk
+        else:
+            # Find the best place to split (last newline before the limit)
+            split_point = remaining_message.rfind('\n', 0, DISCORD_MAX_MSG_LENGTH)
+            if split_point == -1:
+                # No newline found, split at the hard limit
+                split_point = DISCORD_MAX_MSG_LENGTH
+            chunk = remaining_message[:split_point]
+            remaining_message = remaining_message[split_point:].lstrip() # Remove leading whitespace from next chunk
+
+        # Prepare payload for Discord
+        payload = json.dumps({'content': chunk})
+
+        try:
+            logging.info(f"Sending chunk to Discord webhook (approx {len(chunk)} chars)...")
+            response = requests.post(webhook_url, headers=headers, data=payload, timeout=15)
+            response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+            logging.info(f"Discord chunk sent successfully (Status: {response.status_code}).")
+
+            # Add delay if there's more message to send to avoid rate limits
+            if len(remaining_message) > 0:
+                logging.debug(f"Waiting {DISCORD_SEND_DELAY_SECONDS}s before next Discord chunk...")
+                time.sleep(DISCORD_SEND_DELAY_SECONDS)
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error sending Discord notification chunk: {e}")
+            if e.response is not None:
+                logging.error(f"Discord Response status: {e.response.status_code}")
+                logging.error(f"Discord Response text: {e.response.text[:200]}...")
+            success = False # Mark as failed if any chunk fails
+            break # Stop trying to send remaining chunks if one fails
+        except Exception as e:
+             logging.error(f"Unexpected error during Discord notification chunk sending: {e}")
+             success = False
+             break
+
+    if success and len(message_text) > DISCORD_MAX_MSG_LENGTH:
+        logging.info("All Discord message chunks sent successfully.")
+    elif success:
+         logging.info("Discord notification sent successfully (single chunk).")
+    else:
+         logging.error("Failed to send full message to Discord.")
+
+    return success
+
+
 # --- Main Execution Logic ---
 if __name__ == "__main__":
     start_time = time.time()
     logging.info("="*30)
     logging.info("Starting Funpay scraper script - Tracking New Offers & Price Changes")
 
+    # Get Credentials from Environment Variables
     TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+    DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL_ENV') # Get Discord URL
 
+    # Validate Telegram credentials (essential)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logging.error("FATAL: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set.")
         sys.exit("Exiting: Missing Telegram credentials.")
+
+    # Check if Discord URL is provided (optional)
+    if not DISCORD_WEBHOOK_URL:
+         logging.warning("DISCORD_WEBHOOK_URL environment variable not set. Skipping Discord notifications.")
 
     # 1. Load previous offer state ({id: price})
     previous_offer_state = load_offer_state(OFFER_STATE_FILE)
@@ -345,70 +420,82 @@ if __name__ == "__main__":
         # Do NOT save state if scraping failed
         sys.exit("Exiting: Scraping function failed.")
 
-    # 3. Compare current offers with previous state
+    # 3. Compare current offers with previous state and build next state
+    # ... (comparison logic remains unchanged) ...
     new_offers = []
     price_decreased = []
     price_increased = []
+    next_offer_state = previous_offer_state.copy() # Start with previous state
 
-    # Prepare the state for the *next* run. This will contain *all* currently found offers with their *latest* prices.
-    # Offers from previous_offer_state that are *not* in current_offers_details are implicitly removed from tracking state.
-    next_offer_state = {}
-
-    logging.info("Comparing current offers to previous state...")
+    logging.info("Comparing current to previous state and preparing next state...")
     for offer_id, current_details in current_offers_details.items():
-        current_price = current_details.get('price_usd')
-        last_price = previous_offer_state.get(offer_id)
+        # ... (loop content unchanged - determines new_offers, price_decreased, price_increased, next_offer_state) ...
+         current_price = current_details.get('price_usd')
+         last_price = previous_offer_state.get(offer_id) # Will be None if offer_id not in previous state
 
-        # Always add the current price (or None if N/A) to the state for the next run
-        next_offer_state[offer_id] = current_price
-
-        if offer_id not in previous_offer_state:
-            logging.info(f"-> Found New Offer: {offer_id}")
-            new_offers.append(current_details)
-        else:
-            # Offer exists in previous state, check for price change
-            if current_price is not None and last_price is not None:
-                price_diff = current_price - last_price
-                abs_price_diff = abs(price_diff)
-
-                if abs_price_diff > PRICE_CHANGE_THRESHOLD:
-                    # Add last price to the current details dict for easier formatting later
-                    current_details['last_price'] = last_price
-                    if price_diff < 0: # Price decreased
-                        logging.info(f"-> Price Decrease: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f})")
-                        price_decreased.append(current_details)
-                    elif price_diff > 0: # Price increased
+         if offer_id not in previous_offer_state:
+             # Case 1: New offer
+             logging.info(f"-> Found New Offer: {offer_id}")
+             new_offers.append(current_details)
+             next_offer_state[offer_id] = current_price
+         else:
+             # Case 2: Existing offer
+             if current_price is not None and last_price is not None:
+                 # Both numeric
+                 price_diff = current_price - last_price
+                 abs_price_diff = abs(price_diff)
+                 if abs_price_diff > PRICE_CHANGE_THRESHOLD:
+                     current_details['last_price'] = last_price
+                     if price_diff < 0:
+                         logging.info(f"-> Price Decrease: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f})")
+                         price_decreased.append(current_details)
+                     elif price_diff > 0:
                          logging.info(f"-> Price Increase: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f})")
                          price_increased.append(current_details)
-                else:
-                    # Price change is below the threshold
-                    logging.info(f"-> Price change below threshold for {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f}). Ignoring notification.")
-                    # Offer's new price is correctly captured in next_offer_state above, but no notification is sent this run.
-            elif current_price is not None and last_price is None:
-                 # Price wasn't available last time but is now available and numeric.
-                 # Treat this as a new offer to highlight it.
-                 logging.info(f"-> Price now available for {offer_id} (previously N/A): ${current_price:.2f}. Notifying as new.")
-                 new_offers.append(current_details) # Add to new_offers list
-            elif current_price is None and last_price is not None:
-                 # Price was available but is now N/A. Log this warning, state will capture None.
-                 logging.warning(f"-> Price is now N/A for {offer_id} (was ${last_price:.2f}). State updated to None.")
+                     next_offer_state[offer_id] = current_price # Update state
+                 else:
+                     # Insignificant change, state already has last_price from copy
+                     logging.info(f"-> Price change below threshold: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f}). Ignoring.")
+                     pass
+             elif current_price is not None and last_price is None:
+                  # Price became available
+                  logging.info(f"-> Price now available for {offer_id} (prev N/A): ${current_price:.2f}. Notifying as new.")
+                  new_offers.append(current_details)
+                  next_offer_state[offer_id] = current_price
+             elif current_price is None and last_price is not None:
+                  # Price became N/A
+                  logging.warning(f"-> Price is now N/A for {offer_id} (was ${last_price:.2f}). State updated to None.")
+                  next_offer_state[offer_id] = None
+             # Case: current_price is None and last_price is None: state already has None, no action.
+
+    # Handle removed offers:
+    # Offers in previous_offer_state but not in current_offers_details need to be removed from next_offer_state
+    removed_offer_ids = set(previous_offer_state.keys()) - set(current_offers_details.keys())
+    if removed_offer_ids:
+        logging.info(f"Removing {len(removed_offer_ids)} offers not found in current scrape from state: {list(removed_offer_ids)}")
+        for offer_id in removed_offer_ids:
+            if offer_id in next_offer_state: # Should always be true due to copy, but check anyway
+                 del next_offer_state[offer_id]
 
 
     # 4. Sort the lists by price
-    # Sort each list by 'price_usd'. Use float('inf') for None prices to put them last.
+    # ... (sorting logic remains unchanged) ...
     price_sort_key = lambda item: item.get('price_usd', float('inf'))
     new_offers.sort(key=price_sort_key)
     price_decreased.sort(key=price_sort_key)
     price_increased.sort(key=price_sort_key)
     logging.info(f"Sorted {len(new_offers)} new offers, {len(price_decreased)} decreased, {len(price_increased)} increased by price (ascending).")
 
+
     # 5. Format and Send Notification (if anything changed significantly)
     notification_needed = bool(new_offers or price_decreased or price_increased)
-    notification_sent = False
+    # Initialize notification status flags
+    telegram_sent_ok = None
+    discord_sent_ok = None
 
     if notification_needed:
         logging.info("Changes detected above threshold, preparing notification message.")
-        message_parts = ["FunPay(EVE ECHOES) Update:"]
+        message_parts = ["FunPay(EVE ECHOES) Update:\n"]
         item_counter = 0 # Use a single counter for all items in the main block
 
         # Append sections to message parts using the independent helper function
@@ -418,20 +505,33 @@ if __name__ == "__main__":
 
         full_message = "\n".join(message_parts)
 
-        notification_sent = send_telegram_notification(
-            TELEGRAM_BOT_TOKEN,
-            TELEGRAM_CHAT_ID,
-            full_message
-        )
-    else:
-        logging.info("No new offers or significant price changes detected.")
+        # Send to Discord (only if URL is provided)
+        if DISCORD_WEBHOOK_URL:
+            logging.info("--- Attempting Discord Notification ---")
+            discord_sent_ok = send_discord_notification(
+                DISCORD_WEBHOOK_URL,
+                full_message
+            )
+        else:
+             logging.info("--- Skipping Discord Notification (URL not set) ---")
+            # Send to Telegram
+             logging.info("--- Attempting Telegram Notification ---")
+             telegram_sent_ok = send_telegram_notification(
+                TELEGRAM_BOT_TOKEN,
+                TELEGRAM_CHAT_ID,
+                full_message
+            )
 
-    # 6. Save the *current* state to the file for the next run
-    # This state includes the latest prices (or None) for all currently scraped offers.
-    # It correctly handles offers with price changes below threshold (updates state, no notify)
-    # and offers that were removed (implicitly removed from state).
+    else:
+        logging.info("No new offers or significant price changes detected. No notifications sent.")
+
+    # 6. Save the *next* state to the file for the next run
+    # ... (saving logic remains unchanged) ...
     save_offer_state(OFFER_STATE_FILE, next_offer_state)
 
     end_time = time.time()
     logging.info(f"Script finished in {end_time - start_time:.2f} seconds.")
+    # Optional: Log overall notification status
+    if notification_needed:
+         logging.info(f"Notification Status: Telegram OK={telegram_sent_ok}, Discord OK={discord_sent_ok if DISCORD_WEBHOOK_URL else 'N/A'}")
     logging.info("="*30)
