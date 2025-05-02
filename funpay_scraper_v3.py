@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import time
+from datetime import datetime
 import logging
 import re
 import os
@@ -457,9 +458,11 @@ if __name__ == "__main__":
                      elif price_diff > 0:
                          logging.info(f"-> Price Increase (Notify): {offer_id} (${last_price:.2f} -> ${current_price:.2f})")
                          price_increased.append(current_details)
+                 elif price_diff == 0:
+                         logging.info(f"-> No Price change for {offer_id}. Skip notify.")          
                  else:
                      # Insignificant change: Log and IGNORE for notification
-                     logging.info(f"-> Price change below threshold for {offer_id} (${last_price:.2f} -> ${current_price:.2f}). Skip notify.")
+                     logging.info(f"-> Insignificant price change for  {offer_id} (${price_diff:.2f}). Skip notify.")
             elif current_price is not None and last_price is None:
                   # Price became available: Treat as "new" for notification purposes
                   logging.info(f"-> Price now available for {offer_id} (prev N/A): ${current_price:.2f}. Notifying as new.")
@@ -472,8 +475,8 @@ if __name__ == "__main__":
     previous_offer_ids = set(previous_offer_state.keys())
     removed_offer_ids = previous_offer_ids - current_offer_ids
     removed_offer_count = len(removed_offer_ids)
-    if removed_offer_count > 0:
-        logging.info(f"Identified {removed_offer_count} offers from previous state not in current scrape: {list(removed_offer_ids)}")
+    # if removed_offer_count > 0:
+    logging.info(f"Identified {removed_offer_count} offers from previous state not in current scrape: {list(removed_offer_ids) if removed_offer_ids else 'None'}")
 
 
     # 4. Sort the notification lists by price
@@ -490,18 +493,18 @@ if __name__ == "__main__":
 
     if notification_needed:
         logging.info("Changes detected, preparing notification message.")
-        message_parts = ["FunPay(EVE ECHOES) Update:"]
+        message_parts = [f"FunPay(EVE ECHOES) Update:\n {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}"]
         item_counter = 0 # Use a single counter for all items in the main block
 
         # Append sections to message parts using the independent helper function
         item_counter = append_offer_section(message_parts, item_counter, new_offers, "✨ New Offers:", "-" * 15)
-        item_counter = append_offer_section(message_parts, item_counter, price_decreased, "⬇️ Price Decreases:", "-" * 10, price_change_prefix="⬇")
-        item_counter = append_offer_section(message_parts, item_counter, price_increased, "⬆️ Price Increases:", "-" * 10, price_change_prefix="⬆")
+        item_counter = append_offer_section(message_parts, item_counter, price_decreased, "⬇️ Price Down:", "-" * 10, price_change_prefix="⬇")
+        item_counter = append_offer_section(message_parts, item_counter, price_increased, "⬆️ Price Up:", "-" * 10, price_change_prefix="⬆")
         
 	# --- Add removed count summary if applicable ---
-        if removed_offer_count > 0:
-            logging.info(f"{removed_offer_count} offers were sold/removed .")
-            message_parts.append(f"\n{removed_offer_count} offers were sold/removed since last check.")
+        # if removed_offer_count > 0:
+        logging.info(f"{removed_offer_count} offers were sold/removed.")
+        message_parts.append(f"\n{removed_offer_count} offer(s) were sold/removed since last check.")
         # --- End removed count summary ---
 
         full_message = "\n".join(message_parts)
