@@ -115,7 +115,7 @@ def extract_sp_from_description(description):
             if sp_value > SANITY_CHECK_THRESHOLD:
                  corrected_sp_value = sp_value / 1_000_000.0 # Divide by one million
                  logging.warning(
-                     f"Abnormal SP value '{sp_value_str}' detected '{match.group(0)}'. "
+                     f"Abnormal SP value '{sp_value_str}' detected."
                      f"Assuming raw SP and converting to {corrected_sp_value:.2f}M SP."
                  )
                  return corrected_sp_value
@@ -417,98 +417,99 @@ if __name__ == "__main__":
 
     if current_offers_details is None:
         logging.error("Scraping failed. Exiting.")
-        # Do NOT save state if scraping failed
         sys.exit("Exiting: Scraping function failed.")
 
-    # 3. Compare current offers with previous state and build next state
-    # ... (comparison logic remains unchanged) ...
+    # 3. Compare current offers with previous state; Build notification lists and next state
     new_offers = []
     price_decreased = []
     price_increased = []
-    next_offer_state = previous_offer_state.copy() # Start with previous state
+    next_offer_state = {} # Start fresh - will contain ALL current offers
 
-    logging.info("Comparing current to previous state and preparing next state...")
+    logging.info("Comparing current offers to previous state...")
+    current_offer_ids = set() # Keep track of IDs found in this run
     for offer_id, current_details in current_offers_details.items():
-        # ... (loop content unchanged - determines new_offers, price_decreased, price_increased, next_offer_state) ...
-         current_price = current_details.get('price_usd')
-         last_price = previous_offer_state.get(offer_id) # Will be None if offer_id not in previous state
+        current_offer_ids.add(offer_id)
+        current_price = current_details.get('price_usd')
 
-         if offer_id not in previous_offer_state:
-             # Case 1: New offer
-             logging.info(f"-> Found New Offer: {offer_id}")
-             new_offers.append(current_details)
-             next_offer_state[offer_id] = current_price
-         else:
-             # Case 2: Existing offer
-             if current_price is not None and last_price is not None:
+        # --- State Update: Always add current offer and price to next state ---
+        next_offer_state[offer_id] = current_price
+        # --- End State Update ---
+
+        # --- Notification Logic ---
+        last_price = previous_offer_state.get(offer_id) # Will be None if offer_id not in previous state
+
+        if offer_id not in previous_offer_state:
+            # Case 1: New offer
+            logging.info(f"-> Found New Offer: {offer_id} (Price: ${current_price:.2f})" if current_price is not None else f"-> Found New Offer: {offer_id} (Price: N/A)")
+            new_offers.append(current_details)
+        else:
+            # Case 2: Existing offer - check for significant price change for notification
+            if current_price is not None and last_price is not None:
                  # Both numeric
                  price_diff = current_price - last_price
                  abs_price_diff = abs(price_diff)
                  if abs_price_diff > PRICE_CHANGE_THRESHOLD:
-                     current_details['last_price'] = last_price
+                     # Significant change: Add to notification list
+                     current_details['last_price'] = last_price # Add context for message
                      if price_diff < 0:
-                         logging.info(f"-> Price Decrease: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f})")
+                         logging.info(f"-> Price Decrease (Notify): {offer_id} (${last_price:.2f} -> ${current_price:.2f})")
                          price_decreased.append(current_details)
                      elif price_diff > 0:
-                         logging.info(f"-> Price Increase: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f})")
+                         logging.info(f"-> Price Increase (Notify): {offer_id} (${last_price:.2f} -> ${current_price:.2f})")
                          price_increased.append(current_details)
-                     next_offer_state[offer_id] = current_price # Update state
                  else:
-                     # Insignificant change, state already has last_price from copy
-                     logging.info(f"-> Price change below threshold: {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Diff: ${abs_price_diff:.2f}). Ignoring.")
-                     pass
-             elif current_price is not None and last_price is None:
-                  # Price became available
+                     # Insignificant change: Log and IGNORE for notification
+                     logging.info(f"-> Price change below threshold for {offer_id} (${last_price:.2f} -> ${current_price:.2f}). Skip notify.")
+            elif current_price is not None and last_price is None:
+                  # Price became available: Treat as "new" for notification purposes
                   logging.info(f"-> Price now available for {offer_id} (prev N/A): ${current_price:.2f}. Notifying as new.")
-                  new_offers.append(current_details)
-                  next_offer_state[offer_id] = current_price
-             elif current_price is None and last_price is not None:
-                  # Price became N/A
-                  logging.warning(f"-> Price is now N/A for {offer_id} (was ${last_price:.2f}). State updated to None.")
-                  next_offer_state[offer_id] = None
-             # Case: current_price is None and last_price is None: state already has None, no action.
-
-    # Handle removed offers:
-    # Offers in previous_offer_state but not in current_offers_details need to be removed from next_offer_state
-    removed_offer_ids = set(previous_offer_state.keys()) - set(current_offers_details.keys())
-    if removed_offer_ids:
-        logging.info(f"Removing {len(removed_offer_ids)} offers not found in current scrape from state: {list(removed_offer_ids)}")
-        for offer_id in removed_offer_ids:
-            if offer_id in next_offer_state: # Should always be true due to copy, but check anyway
-                 del next_offer_state[offer_id]
+                  new_offers.append(current_details) # Add to new offers list
+            # Cases where current price is None (became N/A or remains N/A) are ignored for notification.
+            # The state already reflects None from the state update logic above.
 
 
-    # 4. Sort the lists by price
-    # ... (sorting logic remains unchanged) ...
+    # Calculate removed offers count
+    previous_offer_ids = set(previous_offer_state.keys())
+    removed_offer_ids = previous_offer_ids - current_offer_ids
+    removed_offer_count = len(removed_offer_ids)
+    if removed_offer_count > 0:
+        logging.info(f"Identified {removed_offer_count} offers from previous state not in current scrape: {list(removed_offer_ids)}")
+
+
+    # 4. Sort the notification lists by price
     price_sort_key = lambda item: item.get('price_usd', float('inf'))
     new_offers.sort(key=price_sort_key)
     price_decreased.sort(key=price_sort_key)
     price_increased.sort(key=price_sort_key)
-    logging.info(f"Sorted {len(new_offers)} new offers, {len(price_decreased)} decreased, {len(price_increased)} increased by price (ascending).")
+    logging.info(f"Sorted notification lists: New={len(new_offers)}, Decreased={len(price_decreased)}, Increased={len(price_increased)}.")
 
 
-    # 5. Format and Send Notification (if anything changed significantly)
+    # 5. Format and Send Notification (if needed)
     notification_needed = bool(new_offers or price_decreased or price_increased)
-    # Initialize notification status flags
-    telegram_sent_ok = None
-    discord_sent_ok = None
+    notification_sent_flags = {'telegram': None, 'discord': None} # Simplified flags
 
     if notification_needed:
-        logging.info("Changes detected above threshold, preparing notification message.")
-        message_parts = ["FunPay(EVE ECHOES) Update:\n"]
+        logging.info("Changes detected, preparing notification message.")
+        message_parts = ["FunPay(EVE ECHOES) Update:"]
         item_counter = 0 # Use a single counter for all items in the main block
 
         # Append sections to message parts using the independent helper function
         item_counter = append_offer_section(message_parts, item_counter, new_offers, "✨ New Offers:", "-" * 15)
-        item_counter = append_offer_section(message_parts, item_counter, price_decreased, "💲⬇️ Price Decreases:", "-" * 10, price_change_prefix="⬇️")
-        item_counter = append_offer_section(message_parts, item_counter, price_increased, "💲⬆️ Price Increases:", "-" * 10, price_change_prefix="⬆️")
+        item_counter = append_offer_section(message_parts, item_counter, price_decreased, "⬇️ Price Decreases:", "-" * 10, price_change_prefix="⬇")
+        item_counter = append_offer_section(message_parts, item_counter, price_increased, "⬆️ Price Increases:", "-" * 10, price_change_prefix="⬆")
+        
+	# --- Add removed count summary if applicable ---
+        if removed_offer_count > 0:
+            logging.info(f"{removed_offer_count} offers were sold/removed .")
+            message_parts.append(f"\n{removed_offer_count} offers were sold/removed since last check.")
+        # --- End removed count summary ---
 
         full_message = "\n".join(message_parts)
 
         # Send to Discord (only if URL is provided)
         if DISCORD_WEBHOOK_URL:
             logging.info("--- Attempting Discord Notification ---")
-            discord_sent_ok = send_discord_notification(
+            notification_sent_flags['discord'] = send_discord_notification(
                 DISCORD_WEBHOOK_URL,
                 full_message
             )
@@ -523,15 +524,17 @@ if __name__ == "__main__":
             )
 
     else:
-        logging.info("No new offers or significant price changes detected. No notifications sent.")
+        # No notification needed based on new/changed offers
+        logging.info("No new offers or significant price changes detected.")
 
-    # 6. Save the *next* state to the file for the next run
-    # ... (saving logic remains unchanged) ...
+    # 6. Save the *next* state (containing ALL current offers) to the file
+    # This state reflects the latest snapshot from the scrape.
+    logging.info(f"Saving state for {len(next_offer_state)} currently listed offers.")
     save_offer_state(OFFER_STATE_FILE, next_offer_state)
 
     end_time = time.time()
     logging.info(f"Script finished in {end_time - start_time:.2f} seconds.")
     # Optional: Log overall notification status
     if notification_needed:
-         logging.info(f"Notification Status: Telegram OK={telegram_sent_ok}, Discord OK={discord_sent_ok if DISCORD_WEBHOOK_URL else 'N/A'}")
+        logging.info(f"Notification Status: Telegram OK={notification_sent_flags['telegram']}, Discord OK={notification_sent_flags['discord'] if DISCORD_WEBHOOK_URL else 'N/A'}")
     logging.info("="*30)
