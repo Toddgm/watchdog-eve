@@ -1,3 +1,5 @@
+# --- START OF FILE funpay_scraper_final.py ---
+
 import requests
 from bs4 import BeautifulSoup
 import time
@@ -8,15 +10,23 @@ import os
 import json # For handling state file
 from urllib.parse import urlparse, parse_qs
 import sys
-if os.path.exists('.env'):
+
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+try:
     from dotenv import load_dotenv
-    load_dotenv()
+    if os.path.exists('.env'):
+        load_dotenv()
+        logging.info("Loaded environment variables from .env file.")
+except ImportError:
+    logging.info("python-dotenv not installed, skipping .env file loading.")
+    pass # Ignore if dotenv is not installed
 
 # --- Configuration ---
 URL = "https://funpay.com/en/lots/687/"
 OFFER_STATE_FILE = "offer_state.json" # Stores {offer_id: last_price}
-PRICE_CHANGE_THRESHOLD = 5.00 # Ignore price changes <= this value (in USD)
-# INCLUDE_PRICE_INCREASES_IN_MSG = False # Set to True if you want to see price increases too (Currently ON)
+PRICE_CHANGE_PERCENT_THRESHOLD = 5.0 # Notify if price decreases by more than this percentage
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
@@ -24,16 +34,22 @@ HEADERS = {
     'Accept-Language': 'en-US,en;q=0.9',
     'Referer': 'https://funpay.com/en/',
 }
-REQUEST_DELAY_SECONDS = 2
-REQUEST_TIMEOUT = 20
-TELEGRAM_MAX_MSG_LENGTH = 4096
-DESCRIPTION_TRUNCATE_LENGTH = 90 # Max chars for description in message
 # Add cookie to force USD currency display
 COOKIES = {
     'cy': 'USD'
 }
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+REQUEST_DELAY_SECONDS = 1
+REQUEST_TIMEOUT = 20
+TELEGRAM_MAX_MSG_LENGTH = 4096
+DISCORD_MAX_MSG_LENGTH = 2000 # Discord message length limit
+DISCORD_SEND_DELAY_SECONDS = 1 # Delay between sending message chunks
+DESCRIPTION_TRUNCATE_LENGTH = 90 # Max chars for description in message
+
+# Environment variable names
+TELEGRAM_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN'
+TELEGRAM_CHAT_ID_ENV = 'TELEGRAM_CHAT_ID'
+DISCORD_WEBHOOK_URL_ENV = 'DISCORD_WEBHOOK_URL' # Single Discord webhook
+
 
 # --- Helper Functions ---
 def load_offer_state(filename):
@@ -52,27 +68,31 @@ def load_offer_state(filename):
                  # Convert int/float to float, keep None as None
                  validated_state[str(offer_id)] = float(price) if isinstance(price, (int, float)) else None
              else:
-                 logging.warning(f"Invalid price type '{type(price)}' for ID {offer_id} in state file. Skipping.")
+                 logging.warning(f"Invalid price type '{type(price)}' for ID {offer_id} in state file '{filename}'. Skipping.")
         logging.info(f"Loaded state for {len(validated_state)} offers from '{filename}'.")
         return validated_state
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding JSON from '{filename}': {e}. Starting with empty state.")
     except Exception as e:
         logging.error(f"Error loading state from '{filename}': {e}. Starting with empty state.")
     return {}
 
 def save_offer_state(filename, current_state):
     """Saves the current offer state ({offer_id: current_price}) to a JSON file."""
-    # Ensure only valid price entries are saved (float or None)
     state_to_save = {}
     for offer_id, price in current_state.items():
-         if isinstance(price, (int, float, type(None))): # Allow None price in state file
-             state_to_save[str(offer_id)] = float(price) if isinstance(price, (int, float)) else None
+         # Only save if price is a valid type (float or None)
+         if isinstance(price, (float, type(None))): # Use float as int prices are converted to float on load/process
+             state_to_save[str(offer_id)] = price
          else:
              logging.warning(f"Attempted to save invalid price type '{type(price)}' for ID {offer_id}. Skipping.")
 
     try:
+        # Sort keys for consistent file output (optional but helpful for diffs)
+        sorted_state_to_save = dict(sorted(state_to_save.items(), key=lambda item: int(item[0])))
         with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(state_to_save, f, indent=2, ensure_ascii=False)
-        logging.info(f"Saved state for {len(state_to_save)} offers to '{filename}'.")
+            json.dump(sorted_state_to_save, f, indent=2, ensure_ascii=False)
+        logging.info(f"Successfully saved state for {len(state_to_save)} offers to '{filename}'.")
     except Exception as e:
         logging.error(f"Error writing state file '{filename}': {e}")
 
@@ -98,63 +118,43 @@ def extract_sp_from_description(description):
     description_lower = description.lower().replace(',', '').strip()
 
     # Pattern: Looks for optional leading space/comma, then number, strictly " m sp", optional trailing space, END
-    # Example matches: ", 100 m sp", "120 m sp", " 50.5 m sp", "1234500 m sp"
-    # This pattern is anchored to the end ($) and specifically looks for the " m sp" unit.
     strict_end_pattern = r'[\s,]*(\d+(?:\.\d+)?)\s*m\s*sp\s*$'
-
     match = re.search(strict_end_pattern, description_lower)
 
     if match:
         sp_value_str = match.group(1)
         try:
             sp_value = float(sp_value_str)
-            
-            # --- ADDED SANITY CHECK ---
-            # If the extracted number is very large (e.g., > 1000), assume it was meant to be raw SP
-            # and the "m sp" was added incorrectly. Convert it to millions.
             SANITY_CHECK_THRESHOLD = 1000 # If extracted number is > 1000, it's probably not M SP
             if sp_value > SANITY_CHECK_THRESHOLD:
                  corrected_sp_value = sp_value / 1_000_000.0 # Divide by one million
                  logging.warning(
-                     f"Abnormal SP value '{sp_value_str}' detected."
-                     f"Assuming raw SP and converting to {corrected_sp_value:.2f}M SP."
+                     f"Abnormal SP value '{sp_value_str}'. "
+                     f"Converting to {corrected_sp_value:.2f}M SP."
                  )
                  return corrected_sp_value
-            # --- END SANITY CHECK ---
-
-            # Based on the strict rule, the number preceding "m sp" is the SP in millions.
             return sp_value
         except ValueError:
             logging.warning(f"Could not convert extracted strict end-SP value '{sp_value_str}' to float.")
-            return None # If conversion fails, it's not a valid SP number
+            return None
     else:
         logging.debug(f"Strict 'X m SP' pattern not found at end of description: '{description}'")
-        return None # Pattern not found
+        return None
 
 def format_offer_body(offer_details):
     """Formats the core details of a single offer (description, price, sp, link) for the message."""
     desc = ' '.join(offer_details['description'].split())
-    # Attempt to preserve the SP part at the end during truncation
     if len(desc) > DESCRIPTION_TRUNCATE_LENGTH:
         sp_match = re.search(r'\d+(?:\.\d+)?\s*m\s*sp\s*$', desc.lower())
         if sp_match:
-             # Calculate length from the start of the SP match to the end of the string
              keep_length = len(desc) - sp_match.start()
-             # If the SP part is shorter than the desired total truncated length,
-             # include enough text from before the SP part.
              if keep_length < DESCRIPTION_TRUNCATE_LENGTH:
-                  # Truncate the beginning of the description
-                  truncate_point = DESCRIPTION_TRUNCATE_LENGTH - keep_length
-                  # Ensure we don't create empty strings or index errors
-                  start_index = max(0, len(desc) - DESCRIPTION_TRUNCATE_LENGTH + 3)
+                  start_index = max(0, len(desc) - DESCRIPTION_TRUNCATE_LENGTH + 3) # +3 for "..."
                   desc = "..." + desc[start_index:]
              else:
-                 # If the SP part is already long, just show it with "..." preceding
                  desc = "..." + desc[sp_match.start():]
         else:
-             # Fallback to simple truncation if SP pattern isn't found at the end
              desc = desc[:DESCRIPTION_TRUNCATE_LENGTH] + "..."
-    # else: desc remains as is if short enough
 
     price_str = f"${offer_details['price_usd']:.2f}" if offer_details['price_usd'] is not None else offer_details.get('price_text', 'Price N/A')
     sp_str = f"{offer_details['sp_million']:.1f}mil" if offer_details['sp_million'] is not None else "SP N/A"
@@ -168,54 +168,47 @@ def format_offer_body(offer_details):
     ]
     return "\n".join(lines)
 
-def format_offer_block_lines(offer_details, item_number, price_change_prefix=""):
+def format_offer_block_lines(offer_details, item_number):
     """Formats a complete block of text for a single offer including header, ratio, and body."""
     price_usd = offer_details.get('price_usd')
     sp_million = offer_details.get('sp_million')
+    discount_percent = offer_details.get('discount_percent') # Get discount % if available
     ratio_str = ""
 
-    # Calculate and format price per SP ratio
     if price_usd is not None and sp_million is not None and sp_million > 0:
         try:
             price_per_million = price_usd / sp_million
             ratio_str = f" [${price_per_million:.2f}/mil]"
         except Exception as e:
-             logging.warning(f"Could not calculate price/SP ratio for offer {offer_details['id']}: {e}")
-             pass # Keep ratio_str empty
+             logging.warning(f"Could not calculate price/SP ratio for offer {offer_details.get('id', 'N/A')}: {e}")
 
-    # Build the header line with counter and ratio
-    header_line = f"#{item_number}{ratio_str}"
+    header_line = f"#{item_number}"
+    if discount_percent is not None:
+         header_line += f" (-{discount_percent:.1f}%) ⬇️" # Add formatted discount
+    header_line += f"{ratio_str}"
 
-    # Add price change info if applicable
-    if price_change_prefix and offer_details.get('last_price') is not None and price_usd is not None:
+    if discount_percent is not None and offer_details.get('last_price') is not None and price_usd is not None:
         last_price = offer_details['last_price']
-        header_line += f" ({price_change_prefix}: ${last_price:.2f} -> ${price_usd:.2f})"
-
+        header_line += f" (${last_price:.2f} -> ${price_usd:.2f})" # Show price change
 
     offer_body = format_offer_body(offer_details)
+    return [header_line, offer_body, ""]
 
-    # Return a list of strings representing the complete block for this offer
-    return [header_line, offer_body, ""] # Header, body, blank line below
-
-def append_offer_section(message_parts_list, current_item_counter, offer_list, section_title, section_separator, price_change_prefix=""):
+def append_offer_section(message_parts_list, current_item_counter, offer_list, section_title, section_separator):
     """Appends a formatted section of offers to the message parts list. Returns the updated item counter."""
     if offer_list:
         message_parts_list.append(f"\n{section_title}")
         message_parts_list.append(section_separator)
-        item_counter = current_item_counter # Start counting from the passed value
+        item_counter = current_item_counter
         for offer in offer_list:
             item_counter += 1
-            # Use the separate function to get formatted lines for one offer block
-            offer_block_lines = format_offer_block_lines(offer, item_counter, price_change_prefix)
+            offer_block_lines = format_offer_block_lines(offer, item_counter)
             message_parts_list.extend(offer_block_lines)
-
-        # Clean up the last blank line added by format_offer_block_lines if it's the very last thing
         if message_parts_list and message_parts_list[-1] == "":
             message_parts_list.pop()
-        message_parts_list.append("=" * 15) # Section end
-        return item_counter # Return the counter after processing this section
-    return current_item_counter # Return the same counter if the list was empty
-
+        message_parts_list.append("=" * 15)
+        return item_counter
+    return current_item_counter
 
 # --- Core Scraping Function ---
 def scrape_all_offers_details(url):
@@ -225,7 +218,6 @@ def scrape_all_offers_details(url):
     try:
         logging.info(f"Waiting {REQUEST_DELAY_SECONDS} seconds...")
         time.sleep(REQUEST_DELAY_SECONDS)
-         # ADDED: Pass the COOKIES dictionary to the requests.get call
         logging.info("Adding cookie 'cy=USD' to request.")
         response = requests.get(url, headers=HEADERS, cookies=COOKIES, timeout=REQUEST_TIMEOUT)
         logging.info(f"Response status code: {response.status_code}")
@@ -235,12 +227,12 @@ def scrape_all_offers_details(url):
         logging.info(f"Found {len(offer_containers)} potential offer(s).")
         if not offer_containers:
             logging.warning("No offer containers found on the page.")
-            return {} # Return empty dict if no offers but request was successful
+            return {}
 
         for container in offer_containers:
             href = container.get('href')
             offer_id = extract_offer_id_from_href(href)
-            if not offer_id: continue # Skip if ID can't be extracted
+            if not offer_id: continue
 
             desc_tag = container.find('div', class_='tc-desc-text')
             description = desc_tag.get_text(separator=' ', strip=True) if desc_tag else "N/A"
@@ -249,24 +241,20 @@ def scrape_all_offers_details(url):
             price_container_tag = container.find('div', class_='tc-price')
             price_text = price_container_tag.get_text(strip=True) if price_container_tag else "N/A"
             price_usd = None
-            # Attempt to parse price. Funpay prices can be complex.
-            # This pattern tries to find a number with optional thousands separators/decimals near currency symbols
-            # or just a plain number. Removes spaces and commas before parsing.
-            cleaned_price_text = price_text.replace(' ', '').replace(',', '').replace('$', '').replace('€', '').replace('£', '')
+            cleaned_price_text = price_text
+            for symbol in ['$', '€', '£', '₽']:
+                 cleaned_price_text = cleaned_price_text.replace(symbol, '')
+            cleaned_price_text = cleaned_price_text.replace(' ', '').replace(',', '')
             try:
-                # Use a simple float conversion after cleaning, assuming the first number is the price
                 price_match = re.search(r'(\d+\.?\d*)', cleaned_price_text)
                 if price_match:
                      price_usd = float(price_match.group(1))
-                # else price_usd remains None
             except ValueError:
-                 logging.warning(f"Offer ID {offer_id}: Could not convert parsed price string '{price_match.group(1) if price_match else cleaned_price_text}' to float from text '{price_text}'")
+                 logging.warning(f"Offer ID {offer_id}: Could not convert price '{price_match.group(1) if price_match else cleaned_price_text}' from '{price_text}'")
             except Exception as e:
-                 logging.warning(f"Offer ID {offer_id}: Unexpected error parsing price '{price_text}': {e}")
-
+                 logging.warning(f"Offer ID {offer_id}: Error parsing price '{price_text}': {e}")
 
             extracted_sp = extract_sp_from_description(description)
-
             all_offers_details[offer_id] = {
                 'id': offer_id, 'description': description, 'seller': seller,
                 'price_usd': price_usd, 'price_text': price_text,
@@ -277,29 +265,25 @@ def scrape_all_offers_details(url):
     except requests.exceptions.RequestException as e:
         logging.error(f"Network/Request Error during scraping: {e}")
     except Exception as e:
-        logging.error(f"Unexpected error during scraping: {e}")
-    return None # Return None on critical failure
+        logging.error(f"Unexpected error during scraping: {e}", exc_info=True) # Include traceback
+    return None
 
-# --- Telegram Notification Function ---
+# --- Notification Functions ---
 def send_telegram_notification(bot_token, chat_id, message_text):
     """Sends the provided message text to Telegram."""
     if not message_text:
-        logging.info("No message content provided to send notification.")
+        logging.info("No message content provided to send Telegram notification.")
         return False
     if not bot_token or not chat_id:
         logging.error("Telegram Bot Token or Chat ID is missing.")
         return False
-    # Encode and check byte length before truncating
     message_bytes = message_text.encode('utf-8')
     if len(message_bytes) > TELEGRAM_MAX_MSG_LENGTH:
-        logging.warning(f"Message length exceeds limit ({TELEGRAM_MAX_MSG_LENGTH} bytes). Truncating.")
-        # Truncate by bytes, then decode. Leave space for the truncation message.
+        logging.warning(f"Telegram message length exceeds limit ({TELEGRAM_MAX_MSG_LENGTH} bytes). Truncating.")
         truncated_bytes = message_bytes[:TELEGRAM_MAX_MSG_LENGTH - 30].decode('utf-8', 'ignore').encode('utf-8')
         message_text = truncated_bytes.decode('utf-8', 'ignore') + "\n... (truncated)"
 
-
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    # Using simple text mode to avoid Markdown escaping issues
     params = {'chat_id': chat_id, 'text': message_text, 'disable_web_page_preview': 'true'}
 
     try:
@@ -318,12 +302,9 @@ def send_telegram_notification(bot_token, chat_id, message_text):
     except Exception as e:
         logging.error(f"Error sending Telegram notification: {e}")
         if isinstance(e, requests.exceptions.RequestException) and e.response is not None:
-            logging.error(f"Response status: {e.response.status_code}")
-            logging.error(f"Response text: {e.response.text[:200]}...")
+            logging.error(f"Telegram Response status: {e.response.status_code}, Text: {e.response.text[:200]}...")
         return False
 
-
-# --- NEW: Discord Notification Function ---
 def send_discord_notification(webhook_url, message_text):
     """Sends the provided message text to Discord via webhook, splitting if necessary."""
     if not message_text:
@@ -333,82 +314,83 @@ def send_discord_notification(webhook_url, message_text):
         logging.error("Discord Webhook URL is missing.")
         return False
 
-    DISCORD_MAX_MSG_LENGTH = 2000 # Discord message length limit
-    DISCORD_SEND_DELAY_SECONDS = 1 # Delay between sending message chunks
-
     headers = {'Content-Type': 'application/json'}
     remaining_message = message_text
-    success = True # Assume success initially
+    success = True
+    message_index = 0
 
     while len(remaining_message) > 0:
+        message_index += 1
+        chunk_to_send = ""
         # Determine the chunk to send
         if len(remaining_message) <= DISCORD_MAX_MSG_LENGTH:
-            chunk = remaining_message
-            remaining_message = "" # This is the last chunk
+            chunk_to_send = remaining_message
+            remaining_message = "" # Last chunk
         else:
             # Find the best place to split (last newline before the limit)
             split_point = remaining_message.rfind('\n', 0, DISCORD_MAX_MSG_LENGTH)
-            if split_point == -1:
-                # No newline found, split at the hard limit
+            if split_point == -1: # No newline found, split hard
                 split_point = DISCORD_MAX_MSG_LENGTH
-            chunk = remaining_message[:split_point]
-            remaining_message = remaining_message[split_point:].lstrip() # Remove leading whitespace from next chunk
+            chunk_to_send = remaining_message[:split_point]
+            remaining_message = remaining_message[split_point:].lstrip()
 
-        # Prepare payload for Discord
-        payload = json.dumps({'content': chunk})
+        # Prepare payload
+        # Add chunk indicator if message is split
+        if message_index > 1:
+             chunk_to_send = f"(Part {message_index}) ...\n{chunk_to_send}"
+        if len(remaining_message) > 0 :
+             chunk_to_send += f"\n... (Continued in next part)"
+
+        payload = json.dumps({'content': chunk_to_send})
 
         try:
-            logging.info(f"Sending chunk to Discord webhook (approx {len(chunk)} chars)...")
+            logging.info(f"Sending chunk {message_index} to Discord webhook (approx {len(chunk_to_send)} chars)...")
             response = requests.post(webhook_url, headers=headers, data=payload, timeout=15)
-            response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
-            logging.info(f"Discord chunk sent successfully (Status: {response.status_code}).")
-
-            # Add delay if there's more message to send to avoid rate limits
+            response.raise_for_status()
+            logging.info(f"Discord chunk {message_index} sent successfully (Status: {response.status_code}).")
             if len(remaining_message) > 0:
                 logging.debug(f"Waiting {DISCORD_SEND_DELAY_SECONDS}s before next Discord chunk...")
                 time.sleep(DISCORD_SEND_DELAY_SECONDS)
-
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Error sending Discord notification chunk: {e}")
-            if e.response is not None:
-                logging.error(f"Discord Response status: {e.response.status_code}")
-                logging.error(f"Discord Response text: {e.response.text[:200]}...")
-            success = False # Mark as failed if any chunk fails
-            break # Stop trying to send remaining chunks if one fails
         except Exception as e:
-             logging.error(f"Unexpected error during Discord notification chunk sending: {e}")
-             success = False
-             break
+            logging.error(f"Error sending Discord notification chunk {message_index}: {e}")
+            if isinstance(e, requests.exceptions.RequestException) and e.response is not None:
+                logging.error(f"Discord Response status: {e.response.status_code}, Text: {e.response.text[:200]}...")
+            success = False
+            break # Stop trying
 
-    if success and len(message_text) > DISCORD_MAX_MSG_LENGTH:
+    if success and message_index > 1:
         logging.info("All Discord message chunks sent successfully.")
     elif success:
          logging.info("Discord notification sent successfully (single chunk).")
     else:
          logging.error("Failed to send full message to Discord.")
-
     return success
 
 
 # --- Main Execution Logic ---
 if __name__ == "__main__":
     start_time = time.time()
+    timestamp = datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')
     logging.info("="*30)
-    logging.info("Starting Funpay scraper script - Tracking New Offers & Price Changes")
+    logging.info("Starting Funpay scraper script - Tracking New Offers & Discounts")
 
     # Get Credentials from Environment Variables
-    TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-    TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-    DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL_ENV') # Get Discord URL
+    TELEGRAM_BOT_TOKEN = os.environ.get(TELEGRAM_BOT_TOKEN_ENV)
+    TELEGRAM_CHAT_ID = os.environ.get(TELEGRAM_CHAT_ID_ENV)
+    DISCORD_WEBHOOK_URL = os.environ.get(DISCORD_WEBHOOK_URL_ENV)
 
-    # Validate Telegram credentials (essential)
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("FATAL: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set.")
-        sys.exit("Exiting: Missing Telegram credentials.")
+    # Validate Credentials
+    notify_via_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    notify_via_discord = bool(DISCORD_WEBHOOK_URL)
 
-    # Check if Discord URL is provided (optional)
-    if not DISCORD_WEBHOOK_URL:
-         logging.warning("DISCORD_WEBHOOK_URL environment variable not set. Skipping Discord notifications.")
+    if not notify_via_telegram and not notify_via_discord:
+         logging.error("FATAL: No notification credentials (Telegram or Discord) found. Set environment variables.")
+         sys.exit("Exiting: Missing notification credentials.")
+    if not notify_via_telegram:
+         logging.warning("Telegram credentials missing. Will only notify via Discord if configured.")
+    if not notify_via_discord:
+         logging.warning(f"{DISCORD_WEBHOOK_URL} env var not set. Will only notify via Telegram if configured.")
+
 
     # 1. Load previous offer state ({id: price})
     previous_offer_state = load_offer_state(OFFER_STATE_FILE)
@@ -420,124 +402,132 @@ if __name__ == "__main__":
         logging.error("Scraping failed. Exiting.")
         sys.exit("Exiting: Scraping function failed.")
 
-    # 3. Compare current offers with previous state; Build notification lists and next state
+    # 3. Compare current offers with previous state; Build notification lists
     new_offers = []
-    price_decreased = []
-    price_increased = []
-    next_offer_state = {} # Start fresh - will contain ALL current offers
+    discounted_offers = []
+    offers_for_next_state = {} # Holds data for the state file IF we decide to save
 
     logging.info("Comparing current offers to previous state...")
-    current_offer_ids = set() # Keep track of IDs found in this run
+    current_offer_ids = set()
     for offer_id, current_details in current_offers_details.items():
         current_offer_ids.add(offer_id)
         current_price = current_details.get('price_usd')
+        last_price = previous_offer_state.get(offer_id)
 
-        # --- State Update: Always add current offer and price to next state ---
-        next_offer_state[offer_id] = current_price
-        # --- End State Update ---
+        # Tentatively add all current offers to the potential next state
+        offers_for_next_state[offer_id] = current_price
 
-        # --- Notification Logic ---
-        last_price = previous_offer_state.get(offer_id) # Will be None if offer_id not in previous state
-
+        # Notification Logic
         if offer_id not in previous_offer_state:
-            # Case 1: New offer
             logging.info(f"-> Found New Offer: {offer_id} (Price: ${current_price:.2f})" if current_price is not None else f"-> Found New Offer: {offer_id} (Price: N/A)")
             new_offers.append(current_details)
-        else:
-            # Case 2: Existing offer - check for significant price change for notification
-            if current_price is not None and last_price is not None:
-                 # Both numeric
+        else: # Existing offer
+            if current_price is not None and last_price is not None and last_price > 0:
                  price_diff = current_price - last_price
-                 abs_price_diff = abs(price_diff)
-                 if abs_price_diff > PRICE_CHANGE_THRESHOLD:
-                     # Significant change: Add to notification list
-                     current_details['last_price'] = last_price # Add context for message
-                     if price_diff < 0:
-                         logging.info(f"-> Price Decrease (Notify): {offer_id} (${last_price:.2f} -> ${current_price:.2f})")
-                         price_decreased.append(current_details)
-                     elif price_diff > 0:
-                         logging.info(f"-> Price Increase (Notify): {offer_id} (${last_price:.2f} -> ${current_price:.2f})")
-                         price_increased.append(current_details)
-                 elif price_diff == 0:
-                         logging.info(f"-> No Price change for {offer_id}. Skip notify.")          
-                 else:
-                     # Insignificant change: Log and IGNORE for notification
-                     logging.info(f"-> Insignificant price change for  {offer_id} (${price_diff:.2f}). Skip notify.")
+                 if price_diff < 0: # Check for decrease only
+                      percent_decrease = abs(price_diff / last_price) * 100.0
+                      if percent_decrease > PRICE_CHANGE_PERCENT_THRESHOLD:
+                           logging.info(f"-> Discount Found (Notify): {offer_id} (${last_price:.2f} -> ${current_price:.2f}, Discount: {percent_decrease:.1f}%)")
+                           current_details['last_price'] = last_price
+                           current_details['discount_percent'] = percent_decrease
+                           discounted_offers.append(current_details)
+                      else:
+                           logging.info(f"-> Price decrease below threshold for {offer_id} ({percent_decrease:.1f}%). Skip notify.")
             elif current_price is not None and last_price is None:
-                  # Price became available: Treat as "new" for notification purposes
                   logging.info(f"-> Price now available for {offer_id} (prev N/A): ${current_price:.2f}. Notifying as new.")
-                  new_offers.append(current_details) # Add to new offers list
-            # Cases where current price is None (became N/A or remains N/A) are ignored for notification.
-            # The state already reflects None from the state update logic above.
-
+                  new_offers.append(current_details)
 
     # Calculate removed offers count
     previous_offer_ids = set(previous_offer_state.keys())
     removed_offer_ids = previous_offer_ids - current_offer_ids
     removed_offer_count = len(removed_offer_ids)
-    # if removed_offer_count > 0:
-    logging.info(f"Identified {removed_offer_count} offers from previous state not in current scrape: {list(removed_offer_ids) if removed_offer_ids else 'None'}")
-
+    if removed_offer_count > 0:
+        logging.info(f"Identified {removed_offer_count} offers from previous state not in current scrape: {list(removed_offer_ids)}")
 
     # 4. Sort the notification lists by price
     price_sort_key = lambda item: item.get('price_usd', float('inf'))
     new_offers.sort(key=price_sort_key)
-    price_decreased.sort(key=price_sort_key)
-    price_increased.sort(key=price_sort_key)
-    logging.info(f"Sorted notification lists: New={len(new_offers)}, Decreased={len(price_decreased)}, Increased={len(price_increased)}.")
+    discounted_offers.sort(key=price_sort_key)
+    logging.info(f"Sorted notification lists: New={len(new_offers)}, Discounts={len(discounted_offers)}, Sold={removed_offer_count}.")
 
+    # 5. Determine if Notification/State Save is Needed and Format Message
+    # Notification/Save is needed if there are new offers, discounts, OR removed offers.
+    significant_changes_detected = bool(new_offers or discounted_offers)
+    state_update_needed = bool(significant_changes_detected or removed_offer_count > 0)
 
-    # 5. Format and Send Notification (if needed)
-    notification_needed = bool(new_offers or price_decreased or price_increased)
-    notification_sent_flags = {'telegram': None, 'discord': None} # Simplified flags
+    notification_sent_flags = {'telegram': None, 'discord': None}
+    full_message = "" # Initialize message variable
 
-    if notification_needed:
-        logging.info("Changes detected, preparing notification message.")
-        message_parts = [f"FunPay(EVE ECHOES) Update:\n {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}"]
-        item_counter = 0 # Use a single counter for all items in the main block
+    if state_update_needed: # Check if *any* relevant change occurred (new, discount, or removed)
+        logging.info("Relevant changes detected, proceeding with notification/state update logic.")
 
-        # Append sections to message parts using the independent helper function
-        item_counter = append_offer_section(message_parts, item_counter, new_offers, "✨ New Offers:", "-" * 15)
-        item_counter = append_offer_section(message_parts, item_counter, price_decreased, "⬇️ Price Down:", "-" * 10, price_change_prefix="⬇")
-        item_counter = append_offer_section(message_parts, item_counter, price_increased, "⬆️ Price Up:", "-" * 10, price_change_prefix="⬆")
-        
-	# --- Add removed count summary if applicable ---
-        # if removed_offer_count > 0:
-        logging.info(f"{removed_offer_count} offers were sold/removed.")
-        message_parts.append(f"\n{removed_offer_count} offer(s) were sold/removed since last check.")
-        # --- End removed count summary ---
+        if significant_changes_detected:
+            # Case 1: New offers or discounts were found (standard message)
+            logging.info("Preparing standard notification message (New/Discounts found).")
+            message_parts = [f"FunPay(EVE ECHOES) Update:\n{timestamp}"]
+            item_counter = 0
+            item_counter = append_offer_section(message_parts, item_counter, new_offers, "✨ New Offers:", "-" * 15)
+            item_counter = append_offer_section(message_parts, item_counter, discounted_offers, "💰 Discounts Found!:", "-" * 10)
+            if removed_offer_count > 0: # Add summary if offers were also removed
+                message_parts.append(f"\nAlso, {removed_offer_count} offers were sold/removed since last check.")
+            full_message = "\n".join(message_parts)
 
-        full_message = "\n".join(message_parts)
+        elif removed_offer_count > 0:
+            # Case 2: ONLY removed offers were found (specific message)
+            logging.info("Preparing specific notification message (Only removed offers found).")
+            full_message = f"FunPay(EVE ECHOES):\n{timestamp}\nNo new offers or significant discounts found.\n{removed_offer_count} offer(s) were dropped/sold since last check."
+            # No need to build detailed sections for this specific message
 
-        # Send to Discord (only if URL is provided)
-        if DISCORD_WEBHOOK_URL:
-            logging.info("--- Attempting Discord Notification ---")
-            notification_sent_flags['discord'] = send_discord_notification(
-                DISCORD_WEBHOOK_URL,
-                full_message
-            )
+        # --- Send Notifications (using the composed full_message) ---
+        if full_message: # Ensure a message was actually composed
+            notification_sent = False # Track if any send succeeds
+            if notify_via_discord:
+                logging.info("--- Attempting Discord Notification (Primary) ---")
+                discord_success = send_discord_notification(DISCORD_WEBHOOK_URL, full_message)
+                notification_sent_flags['discord'] = discord_success
+                notification_sent_flags['telegram'] = False # Mark Telegram as skipped
+                if discord_success: notification_sent = True
+                else: logging.error("Discord notification failed.")
+            elif notify_via_telegram:
+                logging.info("--- Attempting Telegram Notification (Fallback) ---")
+                telegram_success = send_telegram_notification(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, full_message)
+                notification_sent_flags['telegram'] = telegram_success
+                notification_sent_flags['discord'] = False # Mark Discord as skipped
+                if telegram_success: notification_sent = True
+                else: logging.error("Telegram notification failed.")
+            else:
+                logging.error("Notification needed but no platform configured!")
         else:
-             logging.info("--- Skipping Discord Notification (URL not set) ---")
-            # Send to Telegram
-             logging.info("--- Attempting Telegram Notification ---")
-             telegram_sent_ok = send_telegram_notification(
-                TELEGRAM_BOT_TOKEN,
-                TELEGRAM_CHAT_ID,
-                full_message
-            )
+             logging.warning("State update needed, but message composition logic failed.")
+
+
+        # --- SAVE STATE FILE ---
+        # Save the state file because relevant changes were detected
+        logging.info(f"Saving state for {len(offers_for_next_state)} currently listed offers because relevant changes were detected.")
+        save_offer_state(OFFER_STATE_FILE, offers_for_next_state)
+        # --- END SAVE STATE FILE ---
 
     else:
-        # No notification needed based on new/changed offers
-        logging.info("No new offers or significant price changes detected.")
+        # No notification OR state update needed
+        logging.info("No new offers, significant discounts, or removed offers detected.")
+        logging.info("State file will not be updated.")
+        # Note: removed_offer_count must be 0 if we reach here
 
-    # 6. Save the *next* state (containing ALL current offers) to the file
-    # This state reflects the latest snapshot from the scrape.
-    logging.info(f"Saving state for {len(next_offer_state)} currently listed offers.")
-    save_offer_state(OFFER_STATE_FILE, next_offer_state)
-
+    # --- Update final status log ---
     end_time = time.time()
     logging.info(f"Script finished in {end_time - start_time:.2f} seconds.")
-    # Optional: Log overall notification status
-    if notification_needed:
-        logging.info(f"Notification Status: Telegram OK={notification_sent_flags['telegram']}, Discord OK={notification_sent_flags['discord'] if DISCORD_WEBHOOK_URL else 'N/A'}")
+    # Adjust status logging based on the new combined condition 'state_update_needed'
+    if state_update_needed:
+        if notify_via_discord:
+            tg_status = 'Skipped (Discord Primary)'
+            dc_status = f"Attempted (OK={notification_sent_flags['discord']})"
+        elif notify_via_telegram:
+            tg_status = f"Attempted (OK={notification_sent_flags['telegram']})"
+            dc_status = 'Skipped (Telegram Fallback)'
+        else:
+            tg_status = 'Not Configured'
+            dc_status = 'Not Configured'
+        logging.info(f"Notification Status: Telegram {tg_status}, Discord {dc_status}")
     logging.info("="*30)
+
+# --- END OF FILE funpay_scraper_final.py ---
