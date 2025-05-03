@@ -3,7 +3,7 @@
 import requests
 from bs4 import BeautifulSoup
 import time
-from datetime import datetime
+from datetime import datetime,timedelta
 import logging
 import re
 import os
@@ -48,7 +48,7 @@ DESCRIPTION_TRUNCATE_LENGTH = 90 # Max chars for description in message
 # Environment variable names
 TELEGRAM_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN'
 TELEGRAM_CHAT_ID_ENV = 'TELEGRAM_CHAT_ID'
-DISCORD_WEBHOOK_URL_ENV = 'DISCORD_WEBHOOK_URL' # Single Discord webhook
+DISCORD_WEBHOOK_URL = 'DISCORD_WEBHOOK_URL' # Single Discord webhook
 
 
 # --- Helper Functions ---
@@ -183,13 +183,14 @@ def format_offer_block_lines(offer_details, item_number):
              logging.warning(f"Could not calculate price/SP ratio for offer {offer_details.get('id', 'N/A')}: {e}")
 
     header_line = f"#{item_number}"
-    if discount_percent is not None:
-         header_line += f" (-{discount_percent:.1f}%) ⬇️" # Add formatted discount
-    header_line += f"{ratio_str}"
-
+    header_line += f"{ratio_str}\n"
     if discount_percent is not None and offer_details.get('last_price') is not None and price_usd is not None:
         last_price = offer_details['last_price']
         header_line += f" (${last_price:.2f} -> ${price_usd:.2f})" # Show price change
+
+    if discount_percent is not None:
+         header_line += f" ⬇ (-{discount_percent:.1f}%)" # Add formatted discount
+
 
     offer_body = format_offer_body(offer_details)
     return [header_line, offer_body, ""]
@@ -370,14 +371,15 @@ def send_discord_notification(webhook_url, message_text):
 # --- Main Execution Logic ---
 if __name__ == "__main__":
     start_time = time.time()
-    timestamp = datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')
+    utc8_time = datetime.utcfromtimestamp(start_time) + timedelta(hours=8)
+    timestamp = utc8_time.strftime('%Y-%m-%d %H:%M:%S')
     logging.info("="*30)
     logging.info("Starting Funpay scraper script - Tracking New Offers & Discounts")
 
     # Get Credentials from Environment Variables
     TELEGRAM_BOT_TOKEN = os.environ.get(TELEGRAM_BOT_TOKEN_ENV)
     TELEGRAM_CHAT_ID = os.environ.get(TELEGRAM_CHAT_ID_ENV)
-    DISCORD_WEBHOOK_URL = os.environ.get(DISCORD_WEBHOOK_URL_ENV)
+    DISCORD_WEBHOOK_URL = os.environ.get(DISCORD_WEBHOOK_URL)
 
     # Validate Credentials
     notify_via_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
@@ -467,7 +469,7 @@ if __name__ == "__main__":
             message_parts = [f"FunPay(EVE ECHOES) Update:\n{timestamp}"]
             item_counter = 0
             item_counter = append_offer_section(message_parts, item_counter, new_offers, "✨ New Offers:", "-" * 15)
-            item_counter = append_offer_section(message_parts, item_counter, discounted_offers, "💰 Discounts Found!:", "-" * 10)
+            item_counter = append_offer_section(message_parts, item_counter, discounted_offers, "💰 On Sale:", "-" * 15)
             if removed_offer_count > 0: # Add summary if offers were also removed
                 message_parts.append(f"\nAlso, {removed_offer_count} offers were sold/removed since last check.")
             full_message = "\n".join(message_parts)
