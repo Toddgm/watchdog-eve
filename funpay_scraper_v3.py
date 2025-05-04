@@ -46,9 +46,10 @@ DISCORD_SEND_DELAY_SECONDS = 1 # Delay between sending message chunks
 DESCRIPTION_TRUNCATE_LENGTH = 90 # Max chars for description in message
 
 # Environment variable names
-TELEGRAM_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN'
-TELEGRAM_CHAT_ID_ENV = 'TELEGRAM_CHAT_ID'
-DISCORD_WEBHOOK_URL = 'DISCORD_WEBHOOK_URL' # Single Discord webhook
+# TELEGRAM_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN'
+# TELEGRAM_CHAT_ID_ENV = 'TELEGRAM_CHAT_ID'
+# DISCORD_WEBHOOK_URL_ENV = 'DISCORD_WEBHOOK_URL' # Single Discord webhook
+
 
 
 # --- Helper Functions ---
@@ -377,9 +378,9 @@ if __name__ == "__main__":
     logging.info("Starting Funpay scraper script - Tracking New Offers & Discounts")
 
     # Get Credentials from Environment Variables
-    TELEGRAM_BOT_TOKEN = os.environ.get(TELEGRAM_BOT_TOKEN_ENV)
-    TELEGRAM_CHAT_ID = os.environ.get(TELEGRAM_CHAT_ID_ENV)
-    DISCORD_WEBHOOK_URL = os.environ.get(DISCORD_WEBHOOK_URL)
+    TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+    TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+    DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 
     # Validate Credentials
     notify_via_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
@@ -471,13 +472,13 @@ if __name__ == "__main__":
             item_counter = append_offer_section(message_parts, item_counter, new_offers, "✨ New Offers:", "-" * 15)
             item_counter = append_offer_section(message_parts, item_counter, discounted_offers, "💰 On Sale:", "-" * 15)
             if removed_offer_count > 0: # Add summary if offers were also removed
-                message_parts.append(f"\nAlso, {removed_offer_count} offers were sold/removed since last check.")
+                message_parts.append(f"\n{removed_offer_count} offer(s) were sold/removed since last check.")
             full_message = "\n".join(message_parts)
 
         elif removed_offer_count > 0:
             # Case 2: ONLY removed offers were found (specific message)
             logging.info("Preparing specific notification message (Only removed offers found).")
-            full_message = f"FunPay(EVE ECHOES):\n{timestamp}\nNo new offers or significant discounts found.\n{removed_offer_count} offer(s) were dropped/sold since last check."
+            full_message = f"FunPay(EVE ECHOES):\n{timestamp}\n\nNo new offers or significant discounts found.\n{removed_offer_count} offer(s) were dropped/sold since last check."
             # No need to build detailed sections for this specific message
 
         # --- Send Notifications (using the composed full_message) ---
