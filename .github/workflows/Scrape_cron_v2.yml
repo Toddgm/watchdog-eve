@@ -32,7 +32,7 @@ jobs:
         env: # Pass secrets as environment variables to the Python script
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DISCORD_WEBHOOK_URL_ENV: ${{ secrets.DISCORD_WEBHOOK_URL_ENV }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_ENV }}
         run: |
           echo "Running funpay_scraper.py (price tracking)..."
           python funpay_scraper_v3.py
