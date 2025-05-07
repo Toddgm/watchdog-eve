@@ -1,1 +1,6 @@
+.gitignore
 .env
+temp/*
+*.sqlite
+.roo/*
+.vscode/*
