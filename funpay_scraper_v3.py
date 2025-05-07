@@ -49,13 +49,18 @@ DESCRIPTION_TRUNCATE_LENGTH = 90 # Max chars for description in message
 def load_offer_state(filename):
     """Loads offer state ({offer_id: offer_details_dict}) from a JSON file."""
     offer_state = {}
+    # --- CHANGED: Initialize inactive_count ---
+    inactive_count = 0
+    # --- END CHANGED ---
     if not os.path.exists(filename):
         logging.info(f"Offer state file '{filename}' not found. Starting fresh.")
+        # --- CHANGED: Return empty state, no inactive count needed on initial load ---
         return offer_state
+        # --- END CHANGED ---
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             loaded_data = json.load(f)
-        
+
         validated_state = {}
         for offer_id, details in loaded_data.items():
             if isinstance(details, dict):
@@ -65,27 +70,37 @@ def load_offer_state(filename):
                     details['price_usd'] = None
                 elif isinstance(price, (int, float)):
                     details['price_usd'] = float(price)
-                
+
                 details.setdefault('id', str(offer_id))
                 details.setdefault('description', "N/A")
                 details.setdefault('seller', "N/A")
                 details.setdefault('sp_million', None)
                 details.setdefault('href', f"https://funpay.com/en/lots/offer?id={offer_id}")
-                details.setdefault('last_seen_active', None)
+                details.setdefault('last_seen_active', None) # This field isn't used elsewhere, might be vestigial?
                 details.setdefault('price_text', "N/A")
-                # --- ADDED ---
-                details.setdefault('notified_as_removed_at', None) # For tracking removal notification
+                details.setdefault('notified_as_removed_at', None)
+
+                # --- CHANGED: Count inactive offers ---
+                if details.get('notified_as_removed_at') is not None:
+                     inactive_count += 1
+                # --- END CHANGED ---
 
                 validated_state[str(offer_id)] = details
             else:
                 logging.warning(f"Invalid data type for ID {offer_id} in state file '{filename}' (expected dict, got {type(details)}). Skipping.")
-        logging.info(f"Loaded state for {len(validated_state)} offers from '{filename}'.")
+
+        # --- CHANGED: Update logging to include inactive count ---
+        logging.info(f"Loaded state for {len(validated_state)}({inactive_count}/{len(validated_state)} inactive) offers from '{filename}'.")
+        # --- END CHANGED ---
+
         return validated_state
     except json.JSONDecodeError as e:
         logging.error(f"Error decoding JSON from '{filename}': {e}. Starting with empty state.")
     except Exception as e:
         logging.error(f"Error loading state from '{filename}': {e}. Starting with empty state.")
+    # --- CHANGED: Return empty state on error ---
     return {}
+    # --- END CHANGED ---
 
 
 def save_offer_state(filename, current_state_dict):
@@ -472,7 +487,7 @@ if __name__ == "__main__":
                 # Consider if reappeared offers should always be in "new" or a "relisted" list
                 # For now, let it fall through to normal price check logic.
                 # If you want to notify it as "New" because it reappeared:
-                # new_offers_notify.append(current_details_from_scrape) # OPTIONAL: uncomment to notify relisted as new
+                new_offers_notify.append(current_details_from_scrape) # OPTIONAL: uncomment to notify relisted as new
 
             current_price = current_details_from_scrape.get('price_usd')
             last_price = last_known_details.get('price_usd')
@@ -515,7 +530,7 @@ if __name__ == "__main__":
                 removed_offers_notify.append(next_offer_state[offer_id]) # Add its last known details
                 next_offer_state[offer_id]['notified_as_removed_at'] = current_iso_timestamp # Mark as notified
             else:
-                logging.info(f"-> Offer ID {offer_id} was ALREADY NOTED as removed on {next_offer_state[offer_id]['notified_as_removed_at']}. Skipping repeated 'removed' notification.")
+                logging.info(f"-> Offer ID {offer_id} was ALREADY NOTED as removed on {next_offer_state[offer_id]['notified_as_removed_at']}. Skipping notification.")
             
             # Ensure 'last_seen_active' for this "removed" offer reflects when it was *actually* last seen active.
             # It should retain its value from previous_offer_state.
@@ -547,7 +562,7 @@ if __name__ == "__main__":
 
         item_counter = append_offer_section(message_parts, item_counter, new_offers_notify, "✨ New/Reappeared:", "-" * 15)
         item_counter = append_offer_section(message_parts, item_counter, discounted_offers_notify, "💰 On Sale:", "-" * 15, price_change_prefix="⬇️")
-        item_counter = append_offer_section(message_parts, item_counter, removed_offers_notify, "❌ Removed/Sold(Cuurent Cycle):", "-" * 15)
+        item_counter = append_offer_section(message_parts, item_counter, removed_offers_notify, "❌ Removed/Sold(Current Cycle):", "-" * 15)
 
         if len(message_parts) > 1: 
             full_message = "\n".join(message_parts).strip()
@@ -587,7 +602,7 @@ if __name__ == "__main__":
              logging.info("Notification message was empty, no notifications sent.")
 
     else: # notification_needed was False
-        logging.info("No new offers, significant discounts, or first-time removed offers detected for notification.")
+        logging.info("No new offers, significant discounts, or reappeared offers detected for notification.")
 
     # --- SAVE STATE FILE ---
     # Save state regardless of notification success, as long as scraping was successful
