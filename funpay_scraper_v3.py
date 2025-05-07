@@ -426,7 +426,7 @@ if __name__ == "__main__":
     current_iso_timestamp = start_time_utc.isoformat() 
 
     logging.info("="*30)
-    logging.info(f"Starting Funpay scraper script ({display_timestamp}) - Enriched State & NotifyOnceRemoved")
+    logging.info(f"Starting Funpay scraper script ({display_timestamp})")
 
     TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
@@ -504,7 +504,7 @@ if __name__ == "__main__":
                            discounted_offers_notify.append(details_for_notify)
                            # Price in state will be current_price (already in details_for_next_state)
                       else:
-                           logging.info(f"-> Price decrease for ID {offer_id} ({percent_decrease:.1f}%) below threshold. Keeping old price in state.")
+                           logging.info(f"-> Price decrease for ID {offer_id} ({percent_decrease:.1f}%) below threshold. Do Nothing.")
                            details_for_next_state['price_usd'] = last_price 
             elif current_price is not None and last_price is None:
                   logging.info(f"-> Price now available for ID {offer_id} (prev N/A): ${current_price:.2f}. Notifying as new.")
@@ -546,7 +546,7 @@ if __name__ == "__main__":
     discounted_offers_notify.sort(key=price_sort_key)
     removed_offers_notify.sort(key=price_sort_key) 
     
-    logging.info(f"Notification Summary: New={len(new_offers_notify)}, Discounts={len(discounted_offers_notify)}, Removed this cycle={len(removed_offers_notify)}.")
+    logging.info(f"Notification Summary: New={len(new_offers_notify)}, Discounts={len(discounted_offers_notify)}, Removed(Current cycle)={len(removed_offers_notify)}.")
 
     # 5. Determine if Notification is Needed and Format Message
     notification_needed = bool(new_offers_notify or discounted_offers_notify or removed_offers_notify)
@@ -602,12 +602,12 @@ if __name__ == "__main__":
              logging.info("Notification message was empty, no notifications sent.")
 
     else: # notification_needed was False
-        logging.info("No new offers, significant discounts, or reappeared offers detected for notification.")
+        logging.info("Nothing much worth notify...")
 
     # --- SAVE STATE FILE ---
     # Save state regardless of notification success, as long as scraping was successful
     # and processing reached this point.
-    logging.info(f"Saving state for {len(next_offer_state)} offers (includes current, preserved, and removal-notified offers).")
+    logging.info(f"Saving state for {len(next_offer_state)} offers.")
     save_offer_state(OFFER_STATE_FILE, next_offer_state)
     # --- END SAVE STATE FILE ---
 
