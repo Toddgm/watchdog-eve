@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # STEP 1: Checkout repository
-      # Needed for script AND offer_state.json
+      # Needed for script AND offer_history.json
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -38,7 +38,7 @@ jobs:
           python funpay_scraper_v3.py
           # Log status of the state file for verification
           echo "--- Offer State file status after script run ---"
-          ls -l offer_state.json || echo "offer_state.json does not exist yet."
+          ls -l offer_history.json || echo "offer_history.json does not exist yet."
 
       # STEP 5: Commit updated offer state file if changed
       # This is CRUCIAL for remembering prices between runs
@@ -47,10 +47,10 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           # Add the state file specifically. Python script overwrites it.
-          git add offer_state.json
+          git add offer_history.json
           # Check if the file was actually changed or newly added
-          if ! git diff --staged --quiet -- offer_state.json; then
-            echo "Committing changes to offer_state.json..."
+          if ! git diff --staged --quiet -- offer_history.json; then
+            echo "Committing changes to offer_history.json..."
             git commit -m "Update offer price state ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
             # Add retry logic for push
             retry_count=0
@@ -68,10 +68,10 @@ jobs:
               fi
             done
             if ! $push_success; then
-              echo "Error: Failed to push offer_state.json after $max_retries retries."
+              echo "Error: Failed to push offer_history.json after $max_retries retries."
               exit 1
             fi
-            echo "Committed and pushed changes to offer_state.json"
+            echo "Committed and pushed changes to offer_history.json"
           else
-            echo "No changes detected in offer_state.json. Nothing to commit."
+            echo "No changes detected in offer_history.json. Nothing to commit."
           fi

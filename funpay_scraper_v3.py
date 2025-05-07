@@ -25,7 +25,7 @@ except ImportError:
 
 # --- Configuration ---
 URL = "https://funpay.com/en/lots/687/"
-OFFER_STATE_FILE = "offer_state_v2.json" # CHANGED: Use a new state file for enriched data
+OFFER_STATE_FILE = "offer_history.json" # CHANGED: Use a new state file for enriched data
 PRICE_CHANGE_PERCENT_THRESHOLD = 5.0 # Notify if price decreases by more than this percentage
 
 HEADERS = {
@@ -316,7 +316,7 @@ def send_telegram_notification(bot_token, chat_id, message_text):
         return False
 
 def send_discord_notification(webhook_url, message_text):
-    """Sends the provided message text to Discord via webhook, splitting if necessary."""
+    """Sends the provided message text to Discord via webhook, splitting and truncating if necessary."""
     if not message_text:
         logging.info("No message content provided to send Discord notification.")
         return False
@@ -325,35 +325,63 @@ def send_discord_notification(webhook_url, message_text):
         return False
 
     headers = {'Content-Type': 'application/json'}
-    remaining_message = message_text
-    success = True
+    remaining_message = message_text.strip() # Start with stripped message
+    overall_success = True # Tracks if all chunks were sent successfully
     message_index = 0
+    sent_any_chunk = False # Track if at least one chunk was successfully sent
 
     while len(remaining_message) > 0:
         message_index += 1
         chunk_to_send = ""
+        
+        # Determine the chunk to send
         if len(remaining_message) <= DISCORD_MAX_MSG_LENGTH:
             chunk_to_send = remaining_message
-            remaining_message = "" 
+            remaining_message = "" # Last chunk
         else:
+            # Find the best place to split (last newline before the limit)
             split_point = remaining_message.rfind('\n', 0, DISCORD_MAX_MSG_LENGTH)
-            if split_point == -1: 
+            if split_point == -1: # No newline found, hard split at max length
                 split_point = DISCORD_MAX_MSG_LENGTH
             chunk_to_send = remaining_message[:split_point]
-            remaining_message = remaining_message[split_point:].lstrip()
+            remaining_message = remaining_message[split_point:].lstrip() # lstrip to remove leading newlines from next part
 
+        # --- ADDED: Proactive Truncation of the CHUNK itself ---
+        part_indicator = ""
         if message_index > 1:
-             chunk_to_send = f"(Part {message_index}) ...\n{chunk_to_send}"
-        if len(remaining_message) > 0 :
-             chunk_to_send += f"\n... (Continued in next part)"
+            part_indicator = f"(Part {message_index}) ...\n"
+        if len(remaining_message) > 0: # If there's more to come
+            # Reserve space for " (Continued...)" and part indicator
+            reserved_space = len("...\n... (Continued in next part)") + len(part_indicator)
+            if len(chunk_to_send) + reserved_space > DISCORD_MAX_MSG_LENGTH:
+                chunk_to_send = chunk_to_send[:DISCORD_MAX_MSG_LENGTH - reserved_space - 3] + "..." # Truncate chunk
+        elif len(part_indicator) + len(chunk_to_send) > DISCORD_MAX_MSG_LENGTH: # For the last chunk with a part indicator
+             chunk_to_send = chunk_to_send[:DISCORD_MAX_MSG_LENGTH - len(part_indicator) - 3] + "..."
 
-        payload = json.dumps({'content': chunk_to_send})
+
+        # Final assembly of the chunk to send
+        final_chunk = part_indicator + chunk_to_send
+        if len(remaining_message) > 0:
+            final_chunk += "\n... (Continued in next part)"
+        
+        # --- Ensure the final assembled chunk doesn't exceed the limit (failsafe) ---
+        if len(final_chunk) > DISCORD_MAX_MSG_LENGTH:
+            logging.warning(f"Discord chunk {message_index} after assembly is still too long ({len(final_chunk)} chars). Hard truncating.")
+            # This is a last resort, should ideally be caught by logic above
+            final_chunk = final_chunk[:DISCORD_MAX_MSG_LENGTH - 20] + "\n...(hard truncated)" 
+        
+        if not final_chunk.strip(): # Don't send empty chunks
+            logging.debug(f"Skipping empty Discord chunk {message_index}.")
+            continue
+
+        payload = json.dumps({'content': final_chunk})
 
         try:
-            logging.info(f"Sending chunk {message_index} to Discord webhook (approx {len(chunk_to_send)} chars)...")
+            logging.info(f"Sending chunk {message_index} to Discord webhook (approx {len(final_chunk)} chars)...")
             response = requests.post(webhook_url, headers=headers, data=payload, timeout=15)
             response.raise_for_status()
             logging.info(f"Discord chunk {message_index} sent successfully (Status: {response.status_code}).")
+            sent_any_chunk = True # Mark that at least one chunk went through
             if len(remaining_message) > 0:
                 logging.debug(f"Waiting {DISCORD_SEND_DELAY_SECONDS}s before next Discord chunk...")
                 time.sleep(DISCORD_SEND_DELAY_SECONDS)
@@ -361,16 +389,19 @@ def send_discord_notification(webhook_url, message_text):
             logging.error(f"Error sending Discord notification chunk {message_index}: {e}")
             if isinstance(e, requests.exceptions.RequestException) and e.response is not None:
                 logging.error(f"Discord Response status: {e.response.status_code}, Text: {e.response.text[:200]}...")
-            success = False
-            break 
+            overall_success = False # Mark failure
+            break # Stop trying to send further chunks for this message
 
-    if success and message_index > 1:
+    if overall_success and message_index > 1 and sent_any_chunk:
         logging.info("All Discord message chunks sent successfully.")
-    elif success:
+    elif overall_success and sent_any_chunk: # Single chunk success
          logging.info("Discord notification sent successfully (single chunk).")
-    else:
-         logging.error("Failed to send full message to Discord.")
-    return success
+    elif not sent_any_chunk and message_index > 0 : # No chunks sent, means first one failed or all were empty
+         logging.error("Failed to send any message chunk to Discord.")
+         overall_success = False # Ensure overall_success reflects this
+    # If message_index is 0, it means the original message_text was empty, already handled.
+
+    return overall_success # Return True only if ALL intended chunks were sent
 
 # --- Main Execution Logic ---
 if __name__ == "__main__":
@@ -504,8 +535,10 @@ if __name__ == "__main__":
 
     # 5. Determine if Notification is Needed and Format Message
     notification_needed = bool(new_offers_notify or discounted_offers_notify or removed_offers_notify)
+    # Initialize flags assuming failure or not attempted
     notification_sent_flags = {'telegram': False, 'discord': False} 
     full_message = ""
+    any_notification_platform_succeeded = False # Track if at least one platform worked
 
     if notification_needed:
         logging.info("Relevant changes detected, preparing unified notification message.")
@@ -513,31 +546,52 @@ if __name__ == "__main__":
         item_counter = 0
 
         item_counter = append_offer_section(message_parts, item_counter, new_offers_notify, "✨ New/Reappeared:", "-" * 15)
-        item_counter = append_offer_section(message_parts, item_counter, discounted_offers_notify, "💰 Deals on Sale:", "-" * 15, price_change_prefix="⬇️")
-        item_counter = append_offer_section(message_parts, item_counter, removed_offers_notify, "❌ Removed/Sold(Current Cycle):", "-" * 15)
+        item_counter = append_offer_section(message_parts, item_counter, discounted_offers_notify, "💰 On Sale:", "-" * 15, price_change_prefix="⬇️")
+        item_counter = append_offer_section(message_parts, item_counter, removed_offers_notify, "❌ Removed/Sold(Cuurent Cycle):", "-" * 15)
 
         if len(message_parts) > 1: 
             full_message = "\n".join(message_parts).strip()
         else:
             logging.warning("Notification flagged as needed, but no content sections were added. Message will be empty.")
             full_message = "" 
-            notification_needed = False 
+            # notification_needed = False # No, keep notification_needed true for state saving logic if it was set
+                                        # We just won't send an empty message.
 
         if full_message: 
+            discord_attempted_and_failed = False
             if notify_via_discord:
                 logging.info("--- Attempting Discord Notification (Primary) ---")
                 discord_success = send_discord_notification(DISCORD_WEBHOOK_URL, full_message)
                 notification_sent_flags['discord'] = discord_success
-            elif notify_via_telegram: 
-                logging.info("--- Attempting Telegram Notification (Fallback) ---")
+                if discord_success:
+                    any_notification_platform_succeeded = True
+                else:
+                    logging.error("Discord notification failed. Will attempt Telegram fallback if configured.")
+                    discord_attempted_and_failed = True # Flag that Discord failed
+
+            # Fallback to Telegram if Discord is not configured OR if Discord was configured, attempted, AND failed.
+            if notify_via_telegram and (not notify_via_discord or discord_attempted_and_failed):
+                if discord_attempted_and_failed:
+                    logging.info("--- Attempting Telegram Notification (Fallback due to Discord failure) ---")
+                elif not notify_via_discord: # This case is when Discord was never configured
+                    logging.info("--- Attempting Telegram Notification (Discord not configured) ---")
+                
                 telegram_success = send_telegram_notification(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, full_message)
                 notification_sent_flags['telegram'] = telegram_success
-            else: 
-                logging.error("Notification needed but no platform configured!")
-    else:
+                if telegram_success:
+                    any_notification_platform_succeeded = True
+            
+            if not any_notification_platform_succeeded:
+                logging.error("All configured notification attempts failed.")
+        else: # full_message was empty
+             logging.info("Notification message was empty, no notifications sent.")
+
+    else: # notification_needed was False
         logging.info("No new offers, significant discounts, or first-time removed offers detected for notification.")
 
     # --- SAVE STATE FILE ---
+    # Save state regardless of notification success, as long as scraping was successful
+    # and processing reached this point.
     logging.info(f"Saving state for {len(next_offer_state)} offers (includes current, preserved, and removal-notified offers).")
     save_offer_state(OFFER_STATE_FILE, next_offer_state)
     # --- END SAVE STATE FILE ---
@@ -546,18 +600,25 @@ if __name__ == "__main__":
     duration = (end_time_utc - start_time_utc).total_seconds()
     logging.info(f"Script finished in {duration:.2f} seconds.")
     
+    # Log final notification status
     if notification_needed and full_message: 
-        # (Notification status logging remains the same)
+        # Construct more detailed status message
+        status_parts = []
         if notify_via_discord:
-            tg_status = 'Skipped (Discord Primary)' if not notification_sent_flags['telegram'] else f"Attempted (OK={notification_sent_flags['telegram']})"
-            dc_status = f"Attempted (OK={notification_sent_flags['discord']})"
-        elif notify_via_telegram:
-            tg_status = f"Attempted (OK={notification_sent_flags['telegram']})"
-            dc_status = 'Skipped (Telegram Fallback)' if not notification_sent_flags['discord'] else f"Attempted (OK={notification_sent_flags['discord']})"
+            status_parts.append(f"Discord: {'OK' if notification_sent_flags['discord'] else 'FAIL'}")
         else:
-            tg_status = 'Not Configured'
-            dc_status = 'Not Configured'
-        logging.info(f"Notification Status: Telegram {tg_status}, Discord {dc_status}")
+            status_parts.append("Discord: Not Configured")
+        
+        if notify_via_telegram:
+            # Check if Telegram was attempted (either primary or fallback)
+            if (not notify_via_discord or discord_attempted_and_failed):
+                 status_parts.append(f"Telegram: {'OK' if notification_sent_flags['telegram'] else 'FAIL'}")
+            else: # Telegram was not attempted because Discord was primary and succeeded
+                 status_parts.append("Telegram: Skipped (Discord OK)")
+        else:
+            status_parts.append("Telegram: Not Configured")
+        logging.info(f"Notification Status: {', '.join(status_parts)}")
+
     logging.info("="*30)
 
 # --- END OF FILE funpay_scraper_final_v3_notify_once_removed.py ---
