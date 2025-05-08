@@ -1,0 +1,43 @@
+# .github/workflows/scrape.yml
+# CHANGED: Updated name to reflect simplified purpose
+name: FunPay Simplified Scraper
+
+on:
+  schedule:
+    # CHANGED: Run every two hours
+    - cron: "0 */2 * * *"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  scrape-and-notify-criteria: # CHANGED: Job name reflects action
+    runs-on: ubuntu-latest
+    steps:
+      # STEP 1: Checkout repository
+      # Needed for the script
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # STEP 2: Setup Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10" # Keeping Python 3.10
+
+      # STEP 3: Install Python dependencies
+      - name: Install Python dependencies
+        run: pip install requests beautifulsoup4 lxml python-dotenv # Added python-dotenv
+
+      # STEP 4: Run the scraper script
+      # Script scrapes and notifies based on criteria
+      - name: Run Simplified Scraper & Notifier
+        env: # Pass secrets as environment variables to the Python script
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # CHANGED: Ensure correct variable name matches the script
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }} # Assuming secret name is DISCORD_WEBHOOK_URL
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }} # Assuming secret name is TELEGRAM_CHAT_ID
+        run: |
+          # CHANGED: Running the new simplified script name
+          echo "Running FunPay_scraper_simplified.py (criteria check)..."
+          python funpay_scraper_simplified.py
+
+      # REMOVED: Step 5 to commit offer state file is removed as the simplified script doesn't use one.
