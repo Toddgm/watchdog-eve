@@ -3,48 +3,59 @@ name: FunPay Simplified Scraper
 on:
   schedule:
     - cron: "0 */2 * * *" # Run every two hours
-    - cron: "0 10 * * *" # Run at 6pm every day
+    - cron: "0 10 * * *" # Run at 10 AM UTC every day (adjust timezone if needed)
 
   workflow_dispatch: # Allow manual trigger
+    inputs:
+      run_mode:
+        description: "Mode for the scraper (e.g., hourly, heartbeat, or custom)"
+        required: true
+        default: "heartbeat" # Default to 'heartbeat' if not specified
+        type: string
 
 jobs:
-  scrape-and-notify-criteria: # CHANGED: Job name reflects action
+  scrape-and-notify-criteria:
     runs-on: ubuntu-latest
+    env: # Define environment variables at the job level so all steps inherit them
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
-      # STEP 1: Checkout repository
-      # Needed for the script
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # STEP 2: Setup Python environment
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # Use v5 for setup-python
         with:
-          python-version: "3.10" # Keeping Python 3.10
+          python-version: "3.10"
 
-      # STEP 3: Install Python dependencies
       - name: Install Python dependencies
-        run: pip install requests beautifulsoup4 lxml python-dotenv # Added python-dotenv
+        run: pip install requests beautifulsoup4 lxml python-dotenv
 
-      # STEP 4: Run the scraper script
-      # Script scrapes and notifies based on criteria
-      - name: Run Simplified Scraper & Notifier -hourly
-        env: # Pass secrets as environment variables to the Python script
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }} # Assuming secret name is DISCORD_WEBHOOK_URL
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }} # Assuming secret name is TELEGRAM_CHAT_ID
-        if: github.event.schedule == '0 */2 * * *'
+      # DEBUGGING STEP (Optional, but helpful)
+      - name: Show Event Context
+        run: |
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Schedule: ${{ github.event.schedule }}"
+          echo "Inputs: ${{ toJson(github.event.inputs) }}"
+
+      # STEP 4: Run the scraper script (Scheduled - Hourly)
+      - name: Run Simplified Scraper & Notifier - Hourly (Scheduled)
+        if: github.event_name == 'schedule' && github.event.schedule == '0 */2 * * *'
         run: |
           echo "Running Scrape Every two hours cron job..."
           python funpay_scraper_simplified.py hourly
-      - name: Run Simplified Scraper & Notifier -heartbeat
-        if: github.event.schedule == '0 10 * * *'
+
+      # STEP 5: Run the scraper script (Scheduled - Heartbeat)
+      - name: Run Simplified Scraper & Notifier - Heartbeat (Scheduled)
+        if: github.event_name == 'schedule' && github.event.schedule == '0 10 * * *'
         run: |
-          echo "Heartbeat check..."
+          echo "Scheduled heartbeat check..."
           python funpay_scraper_simplified.py heartbeat
 
-      - name: Run Simplified Scraper & Notifier -manual
-        if: github.event.schedule == 'workflow_dispatch'
+      # STEP 6: Run the scraper script (Manually Triggered)
+      - name: Run Simplified Scraper & Notifier - Manual Trigger
+        if: github.event_name == 'workflow_dispatch'
         run: |
-          echo "manual testing, running on heartbeat mode..."
-          python funpay_scraper_simplified.py heartbeat
+          echo "Manual testing, running with mode: ${{ github.event.inputs.run_mode }}"
+          python funpay_scraper_simplified.py ${{ github.event.inputs.run_mode }}
