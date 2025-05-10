@@ -349,8 +349,9 @@ def send_discord_notification(webhook_url, message_text):
 if __name__ == "__main__":
     start_time_utc = datetime.now(timezone.utc)
     utc8_offset = timedelta(hours=8)
-    display_timestamp = (start_time_utc + utc8_offset).strftime('%Y-%m-%d %H:%M:%S UTC+8')
-
+    display_timestamp = (start_time_utc + utc8_offset).strftime('%y-%m-%d %H:%M:%S')
+    schedule_type = sys.argv[1] if len(sys.argv) >1 else "unknown"
+    logging.info(f"crruent mode:{schedule_type}")
     logging.info("="*30)
     logging.info(f"Starting Simplified Funpay Scraper ({display_timestamp})")
 
@@ -381,18 +382,21 @@ if __name__ == "__main__":
 
     # 2. Filter offers based on simplified criteria
     matching_offers = []
-    logging.info(f"Filtering scraped offers by criteria: Price < ${PRICE_THRESHOLD_USD:.2f} AND SP > {SP_THRESHOLD_MILLION:.1f}M")
 
     for offer_id, details in current_offers_scrape_dict.items():
         price_usd = details.get('price_usd')
         sp_million = details.get('sp_million')
 
-        if price_usd is not None and sp_million is not None:
+        # if price_usd is not None and sp_million is not None:
+        if schedule_type == "heartbeat":
+            if price_usd < 120.0 and sp_million > 30:
+                logging.info(f"->Well,Offer {offer_id}(Price: ${price_usd:.2f}) looks promising :)")
+                matching_offers.append(details)
+            # continue
+        else:
             if price_usd < PRICE_THRESHOLD_USD and sp_million > SP_THRESHOLD_MILLION:
                 logging.info(f"-> Offer ID {offer_id} matches criteria (Price: ${price_usd:.2f}, SP: {sp_million:.1f}M).")
                 matching_offers.append(details)
-            # else: logging.debug(f"Offer ID {offer_id} does not match criteria (Price: {price_usd}, SP: {sp_million})")
-        # else: logging.debug(f"Offer ID {offer_id} missing price or SP (Price: {price_usd}, SP: {sp_million})")
 
     # 3. Sort matching offers by price (ascending)
     price_sort_key = lambda item: item.get('price_usd', float('inf'))
@@ -407,15 +411,14 @@ if __name__ == "__main__":
 
     if notification_needed:
         logging.info("Matching offers found, preparing notification message.")
-        message_parts = [f"FunPay(EVE ECHOES) Update:",
-                         f"-- Total {offer_count} found --",
+        message_parts = [f"[{schedule_type}] -- [{len(matching_offers)} | {offer_count}]",
                          f"{display_timestamp}"]
 
         item_counter = 0 # Use a single counter
 
         # Append the section of matching offers using the helper
         # We reuse append_offer_section, but it's simpler now (only one list)
-        item_counter = append_offer_section(message_parts, item_counter, matching_offers, " # Matching Offers", "-" * 15)
+        item_counter = append_offer_section(message_parts, item_counter, matching_offers, " # Matching Offers" if schedule_type == 'hourly' else "# Promising offers", "-" * 15)
 
 
         if len(message_parts) > 3: # Check if any offers were actually added below the header

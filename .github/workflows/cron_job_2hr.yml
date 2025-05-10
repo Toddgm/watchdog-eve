@@ -1,11 +1,10 @@
-# .github/workflows/scrape.yml
-# CHANGED: Updated name to reflect simplified purpose
 name: FunPay Simplified Scraper
 
 on:
   schedule:
-    # CHANGED: Run every two hours
-    - cron: "0 */2 * * *"
+    - cron: "0 */2 * * *" # Run every two hours
+    - cron: "0 10 * * *" # Run at 6pm every day
+
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -29,15 +28,23 @@ jobs:
 
       # STEP 4: Run the scraper script
       # Script scrapes and notifies based on criteria
-      - name: Run Simplified Scraper & Notifier
+      - name: Run Simplified Scraper & Notifier -hourly
         env: # Pass secrets as environment variables to the Python script
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          # CHANGED: Ensure correct variable name matches the script
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }} # Assuming secret name is DISCORD_WEBHOOK_URL
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }} # Assuming secret name is TELEGRAM_CHAT_ID
+        if: github.event.schedule == '0 */2 * * *'
         run: |
-          # CHANGED: Running the new simplified script name
-          echo "Running FunPay_scraper_simplified.py (criteria check)..."
-          python funpay_scraper_simplified.py
+          echo "Running Scrape Every two hours cron job..."
+          python funpay_scraper_simplified.py hourly
+      - name: Run Simplified Scraper & Notifier -heartbeat
+        if: github.event.schedule == '0 10 * * *'
+        run: |
+          echo "Heartbeat check..."
+          python funpay_scraper_simplified.py heartbeat
 
-      # REMOVED: Step 5 to commit offer state file is removed as the simplified script doesn't use one.
+      - name: Run Simplified Scraper & Notifier -manual
+        if: github.event.schedule == 'workflow_dispatch'
+        run: |
+          echo "manual testing, running on heartbeat mode..."
+          python funpay_scraper_simplified.py heartbeat
