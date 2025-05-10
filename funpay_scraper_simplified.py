@@ -26,7 +26,7 @@ except ImportError:
 # --- Configuration ---
 URL = "https://funpay.com/en/lots/687/"
 PRICE_THRESHOLD_USD = 60.0  # Notify if price is BELOW this USD value
-SP_THRESHOLD_MILLION = 50.0 # Notify if SP is ABOVE this value (in millions)
+SP_THRESHOLD_MILLION = 0.0 # Notify if SP is ABOVE this value (in millions)
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
@@ -359,7 +359,8 @@ if __name__ == "__main__":
     DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 
     notify_via_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
-    notify_via_discord = bool(DISCORD_WEBHOOK_URL)
+    # notify_via_discord = bool(DISCORD_WEBHOOK_URL)
+    notify_via_discord = false # disable discord notify
 
     if not notify_via_telegram and not notify_via_discord:
          logging.error("FATAL: No notification credentials (Telegram or Discord) found.")
