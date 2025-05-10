@@ -360,7 +360,7 @@ if __name__ == "__main__":
 
     notify_via_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
     # notify_via_discord = bool(DISCORD_WEBHOOK_URL)
-    notify_via_discord = false # disable discord notify
+    notify_via_discord = False # disable discord notify
 
     if not notify_via_telegram and not notify_via_discord:
          logging.error("FATAL: No notification credentials (Telegram or Discord) found.")
