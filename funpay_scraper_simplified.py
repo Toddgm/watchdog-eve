@@ -411,14 +411,14 @@ if __name__ == "__main__":
 
     if notification_needed:
         logging.info("Matching offers found, preparing notification message.")
-        message_parts = [f"[{schedule_type}] -- [{len(matching_offers)} | {offer_count}]",
+        message_parts = [f"👀 [{schedule_type.upper()}] -- #️⃣ [ {len(matching_offers)} / {offer_count} ]",
                          f"{display_timestamp}"]
 
         item_counter = 0 # Use a single counter
 
         # Append the section of matching offers using the helper
         # We reuse append_offer_section, but it's simpler now (only one list)
-        item_counter = append_offer_section(message_parts, item_counter, matching_offers, " # Matching Offers" if schedule_type == 'hourly' else "# Promising offers", "-" * 15)
+        item_counter = append_offer_section(message_parts, item_counter, matching_offers, " ❤️ Matching Offers" if schedule_type == 'hourly' else "🎉 Promising offers", "-" * 15)
 
 
         if len(message_parts) > 3: # Check if any offers were actually added below the header
